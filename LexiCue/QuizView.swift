@@ -9,6 +9,7 @@ struct QuizView: View {
     @State private var currentIndex = 0
     @State private var isLoading = false
     @State private var generationStatus = "Building practice cards."
+    @State private var loadingProgress = 0.0
     @State private var generationTask: Task<Void, Never>?
     @State private var userAnswer = ""
     @State private var resultMessage = ""
@@ -27,8 +28,23 @@ struct QuizView: View {
         ScrollView {
             VStack(spacing: 24) {
                 if isLoading {
-                    ProgressView("Preparing Practice")
-                        .frame(maxWidth: .infinity, minHeight: 220)
+                    VStack(spacing: 16) {
+                        Text("Preparing Practice")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+
+                        ProgressView(value: loadingProgress, total: 1)
+                            .tint(.blue)
+
+                        Text("\(Int((loadingProgress * 100).rounded()))%")
+                            .font(.headline)
+
+                        Text(generationStatus)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 220)
                 } else if practiceCards.isEmpty {
                     ContentUnavailableView(
                         practiceMode.emptyTitle,
@@ -234,8 +250,10 @@ struct QuizView: View {
             let result = await PracticeCardFactory.makeCards(
                 for: [phrase],
                 phraseProgress: [:],
+                practiceMode: .all,
                 source: PracticeGenerationSource.ai,
-                configuration: backendConfiguration
+                configuration: backendConfiguration,
+                progress: nil
             )
 
             if Task.isCancelled { return }
@@ -265,20 +283,30 @@ struct QuizView: View {
     @MainActor
     func generatePracticeCards() async {
         isLoading = true
+        loadingProgress = 0
         currentIndex = 0
         resetCardState()
+        generationStatus = "Choosing phrases for this round."
 
         let result = await PracticeCardFactory.makeCards(
             for: activePhrases,
             phraseProgress: phraseProgress,
+            practiceMode: practiceMode,
             source: generationSource,
-            configuration: backendConfiguration
+            configuration: backendConfiguration,
+            progress: { completed, total in
+                await MainActor.run {
+                    loadingProgress = total > 0 ? Double(completed) / Double(total) : 0
+                    generationStatus = "Generating phrases \(completed) of \(total)."
+                }
+            }
         )
         if Task.isCancelled { return }
 
         practiceCards = result.cards
         generationStatus = result.status
         isLoading = false
+        loadingProgress = 1
         isRefreshingCurrentCard = false
         answerFieldFocused = !practiceCards.isEmpty
     }
@@ -595,8 +623,10 @@ enum PracticeCardFactory {
     static func makeCards(
         for phrases: [String],
         phraseProgress: [String: PhraseProgress],
+        practiceMode: PracticeMode,
         source: PracticeGenerationSource,
-        configuration: BackendConfiguration
+        configuration: BackendConfiguration,
+        progress: (@Sendable (_ completed: Int, _ total: Int) async -> Void)?
     ) async -> PracticeCardResult {
         let cleanedPhrases = phrases
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -609,6 +639,7 @@ enum PracticeCardFactory {
         let sessionPhrases = selectedSessionPhrases(
             from: cleanedPhrases,
             phraseProgress: phraseProgress,
+            practiceMode: practiceMode,
             source: source
         )
 
@@ -617,11 +648,16 @@ enum PracticeCardFactory {
                 do {
                     let generatedCards = try await BackendSentenceProvider().cards(
                         for: sessionPhrases,
-                        configuration: configuration
+                        configuration: configuration,
+                        progress: progress
                     )
                     if !generatedCards.isEmpty {
                         return PracticeCardResult(
-                            cards: weightedCards(from: generatedCards, phraseProgress: phraseProgress),
+                            cards: finalizedCards(
+                                from: generatedCards,
+                                phraseProgress: phraseProgress,
+                                practiceMode: practiceMode
+                            ),
                             status: statusText(
                                 for: phraseProgress,
                                 aiEnabled: true,
@@ -634,6 +670,7 @@ enum PracticeCardFactory {
                     return fallbackResult(
                         phrases: sessionPhrases,
                         phraseProgress: phraseProgress,
+                        practiceMode: practiceMode,
                         status: "AI failed (\(message)), using built-in sentence prompts instead."
                     )
                 }
@@ -642,6 +679,7 @@ enum PracticeCardFactory {
             return fallbackResult(
                 phrases: sessionPhrases,
                 phraseProgress: phraseProgress,
+                practiceMode: practiceMode,
                 status: "AI backend is not configured, using built-in sentence prompts."
             )
         }
@@ -649,20 +687,35 @@ enum PracticeCardFactory {
         return fallbackResult(
             phrases: sessionPhrases,
             phraseProgress: phraseProgress,
+            practiceMode: practiceMode,
             status: "Using built-in sentence prompts because AI is unavailable."
         )
     }
 
-    private static func fallbackResult(phrases: [String], phraseProgress: [String: PhraseProgress], status: String) -> PracticeCardResult {
+    private static func fallbackResult(
+        phrases: [String],
+        phraseProgress: [String: PhraseProgress],
+        practiceMode: PracticeMode,
+        status: String
+    ) -> PracticeCardResult {
         let cards = phrases
             .flatMap { phrase in
                 SentenceGenerator.cards(for: phrase)
             }
 
         return PracticeCardResult(
-            cards: weightedCards(from: cards, phraseProgress: phraseProgress),
+            cards: finalizedCards(from: cards, phraseProgress: phraseProgress, practiceMode: practiceMode),
             status: statusText(for: phraseProgress, aiEnabled: false, base: status)
         )
+    }
+
+    private static func finalizedCards(from cards: [PracticeCard], phraseProgress: [String: PhraseProgress], practiceMode: PracticeMode) -> [PracticeCard] {
+        switch practiceMode {
+        case .all:
+            return repeatedRoundCards(from: cards, repeatsPerPhrase: 3)
+        case .review:
+            return weightedCards(from: cards, phraseProgress: phraseProgress)
+        }
     }
 
     private static func weightedCards(from cards: [PracticeCard], phraseProgress: [String: PhraseProgress]) -> [PracticeCard] {
@@ -677,14 +730,50 @@ enum PracticeCardFactory {
             }
         }
 
-        return weighted.shuffled()
+        return spacedCards(from: weighted.shuffled())
+    }
+
+    private static func repeatedRoundCards(from cards: [PracticeCard], repeatsPerPhrase: Int) -> [PracticeCard] {
+        let groupedCards = Dictionary(grouping: cards, by: \.phrase)
+        let phrases = Array(groupedCards.keys).shuffled()
+        var arranged: [PracticeCard] = []
+
+        for roundIndex in 0..<repeatsPerPhrase {
+            for phrase in phrases {
+                guard let phraseCards = groupedCards[phrase], !phraseCards.isEmpty else { continue }
+                let sourceIndex = min(roundIndex, phraseCards.count - 1)
+                arranged.append(phraseCards.shuffled()[sourceIndex])
+            }
+        }
+
+        return spacedCards(from: arranged)
+    }
+
+    private static func spacedCards(from cards: [PracticeCard]) -> [PracticeCard] {
+        guard cards.count > 1 else { return cards }
+
+        var remaining = cards
+        var arranged: [PracticeCard] = []
+
+        while !remaining.isEmpty {
+            let previousPhrase = arranged.last?.phrase
+            let nextIndex = remaining.firstIndex { $0.phrase != previousPhrase } ?? 0
+            arranged.append(remaining.remove(at: nextIndex))
+        }
+
+        return arranged
     }
 
     private static func selectedSessionPhrases(
         from phrases: [String],
         phraseProgress: [String: PhraseProgress],
+        practiceMode: PracticeMode,
         source: PracticeGenerationSource
     ) -> [String] {
+        if practiceMode == .all {
+            return Array(phrases.shuffled().prefix(min(10, phrases.count)))
+        }
+
         let maxPhrases = source == .ai ? 12 : 20
         guard phrases.count > maxPhrases else { return phrases }
 
@@ -769,7 +858,11 @@ enum PracticeGenerationSource {
 }
 
 struct BackendSentenceProvider {
-    func cards(for phrases: [String], configuration: BackendConfiguration) async throws -> [PracticeCard] {
+    func cards(
+        for phrases: [String],
+        configuration: BackendConfiguration,
+        progress: (@Sendable (_ completed: Int, _ total: Int) async -> Void)?
+    ) async throws -> [PracticeCard] {
         await withTaskGroup(of: [PracticeCard].self) { group in
             for phrase in phrases {
                 group.addTask {
@@ -795,8 +888,13 @@ struct BackendSentenceProvider {
             }
 
             var cards: [PracticeCard] = []
+            var completed = 0
             for await phraseCards in group {
                 cards.append(contentsOf: phraseCards)
+                completed += 1
+                if let progress {
+                    await progress(completed, phrases.count)
+                }
             }
 
             return cards

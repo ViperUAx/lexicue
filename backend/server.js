@@ -191,10 +191,19 @@ app.post("/classify-difficulty", async (request, response) => {
                         {
                             type: "input_text",
                             text: [
-                                "You estimate how difficult an English word or phrase is for a language learner.",
-                                "Use level 1 for very common beginner vocabulary.",
-                                "Use level 5 for rare, formal, idiomatic, legal, academic, or advanced language.",
-                                "Return only the best overall difficulty level."
+                                "You estimate how difficult an English word or phrase is for an English learner using a CEFR-like 1 to 5 scale.",
+                                "Consider frequency, formality, abstractness, figurative meaning, idiomaticity, and how likely a learner is to meet or actively use the item.",
+                                "Pay special attention to multiword phrases, idioms, figurative expressions, phrasal verbs, and fixed expressions.",
+                                "Do not rate only by the difficulty of the individual words; judge the whole expression as a vocabulary item.",
+                                "If a phrase is idiomatic, non-literal, formal, legal, academic, nuanced, or uncommon in everyday speech, raise the level accordingly.",
+                                "Use these levels:",
+                                "Level 1 = Beginner / A1: very common, concrete, everyday words and phrases understood by basic learners.",
+                                "Level 2 = Elementary / A2: common daily vocabulary and simple expressions, still mostly concrete and familiar.",
+                                "Level 3 = Intermediate / B1-B2: less common but still broadly useful vocabulary, including many workplace, media, and abstract items.",
+                                "Level 4 = Advanced / C1: formal, nuanced, low-frequency, idiomatic, academic, or professional vocabulary.",
+                                "Level 5 = Expert / C2+: rare, highly idiomatic, literary, legal, technical, or especially difficult expressions.",
+                                "When unsure, prefer the level that best reflects real learner difficulty rather than word length.",
+                                "Return only the single best overall difficulty level."
                             ].join(" ")
                         }
                     ]
