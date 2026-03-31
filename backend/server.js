@@ -133,8 +133,12 @@ app.post("/generate-sentence", async (request, response) => {
                                 "You create short, natural sentence prompts for English vocabulary practice.",
                                 "Return exactly four English sentences.",
                                 "Each sentence must contain the target phrase exactly once.",
+                                "The learner must be able to answer with the exact saved phrase unchanged.",
+                                "Do not require any tense change, plural change, article change, or other grammatical transformation.",
+                                "If the phrase is a base-form verb or verb phrase, write the sentence so that the base form fits naturally as written.",
                                 "Keep sentences clear, natural, and between 8 and 20 words.",
-                                "Use the phrase naturally, not as a dictionary definition."
+                                "Use the phrase naturally, not as a dictionary definition.",
+                                "Reject any sentence where the exact phrase would sound ungrammatical when inserted into the blank."
                             ].join(" ")
                         }
                     ]
