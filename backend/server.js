@@ -62,6 +62,21 @@ const difficultyResponseSchema = {
     strict: true
 };
 
+const hintResponseSchema = {
+    name: "phrase_hint",
+    schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+            hint: {
+                type: "string"
+            }
+        },
+        required: ["hint"]
+    },
+    strict: true
+};
+
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(express.json({ limit: "16kb" }));
@@ -205,6 +220,62 @@ app.post("/classify-difficulty", async (request, response) => {
         logServerError("classify-difficulty", error);
         response.status(503).json({
             error: "Difficulty classification is temporarily unavailable."
+        });
+    }
+});
+
+app.post("/explain-phrase", async (request, response) => {
+    const parsed = phraseRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+        response.status(400).json({
+            error: "Invalid request body."
+        });
+        return;
+    }
+
+    try {
+        const result = await openai.responses.create({
+            model: openAIModel,
+            input: [
+                {
+                    role: "system",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: [
+                                "You explain the meaning of an English word or phrase for language learners.",
+                                "Return one short plain-English hint.",
+                                "Do not repeat the phrase itself.",
+                                "Keep it under 18 words."
+                            ].join(" ")
+                        }
+                    ]
+                },
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: `Explain the meaning of this English word or phrase in one short hint: ${parsed.data.phrase}`
+                        }
+                    ]
+                }
+            ],
+            text: {
+                format: {
+                    type: "json_schema",
+                    ...hintResponseSchema
+                }
+            }
+        });
+
+        const payload = extractJSONObject(result.output_text);
+        const parsedPayload = JSON.parse(payload);
+        response.json(parsedPayload);
+    } catch (error) {
+        logServerError("explain-phrase", error);
+        response.status(503).json({
+            error: "Meaning hint is temporarily unavailable."
         });
     }
 });

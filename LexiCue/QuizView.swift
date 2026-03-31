@@ -14,7 +14,11 @@ struct QuizView: View {
     @State private var resultMessage = ""
     @State private var hasCheckedAnswer = false
     @State private var revealAnswer = false
-    @State private var generationSource: PracticeGenerationSource = .local
+    @State private var meaningHint: String?
+    @State private var isLoadingMeaningHint = false
+    @State private var showLetterHint = false
+    @State private var recordedWrongAttempt = false
+    @State private var generationSource: PracticeGenerationSource = .ai
     @State private var isRefreshingCurrentCard = false
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     @FocusState private var answerFieldFocused: Bool
@@ -63,7 +67,7 @@ struct QuizView: View {
                             .fontWeight(.bold)
 
                         Text(currentCard.prompt)
-                            .font(.title2)
+                            .font(.system(size: 32, weight: .medium))
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         TextField("Type the missing phrase", text: $userAnswer)
@@ -81,6 +85,36 @@ struct QuizView: View {
                             Text(resultMessage)
                                 .font(.headline)
                                 .foregroundStyle(isAnswerCorrect(for: currentCard) ? .green : .red)
+                        }
+
+                        if isLoadingMeaningHint {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Loading meaning hint...")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let meaningHint {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Meaning hint")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Text(meaningHint)
+                                    .font(.subheadline)
+                            }
+                        }
+
+                        if showLetterHint {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("First and last letters")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Text(edgeLetterHint(for: currentCard.phrase))
+                                    .font(.headline)
+                            }
                         }
 
                         if revealAnswer {
@@ -110,6 +144,20 @@ struct QuizView: View {
                             revealAnswer.toggle()
                         }
                         .buttonStyle(.bordered)
+                    }
+
+                    if hasCheckedAnswer && !isAnswerCorrect(for: currentCard) {
+                        HStack(spacing: 12) {
+                            Button(showLetterHint ? "Hide First & Last Letters" : "Show First & Last Letters") {
+                                showLetterHint.toggle()
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Next Card") {
+                                showNextCard()
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
 
                     HStack(spacing: 12) {
@@ -162,10 +210,10 @@ struct QuizView: View {
 
     func refreshPracticeCardsIfNeeded() {
         guard practiceCards.isEmpty, !isLoading else { return }
-        refreshPracticeCards()
+        refreshPracticeCards(using: .ai)
     }
 
-    func refreshPracticeCards(using source: PracticeGenerationSource = .local) {
+    func refreshPracticeCards(using source: PracticeGenerationSource = .ai) {
         generationTask?.cancel()
         generationSource = source
         generationTask = Task {
@@ -236,22 +284,37 @@ struct QuizView: View {
     }
 
     func checkAnswer(for card: PracticeCard) {
-        guard !userAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasCheckedAnswer else { return }
+        guard !userAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        hasCheckedAnswer = true
-        answerFieldFocused = false
         let answerWasCorrect = isAnswerCorrect(for: card)
-        resultMessage = answerWasCorrect
-            ? "Correct"
-            : "Not quite. Try again or reveal the answer."
+        hasCheckedAnswer = true
 
-        recordResult(for: card, wasCorrect: answerWasCorrect)
+        if answerWasCorrect {
+            answerFieldFocused = false
+            resultMessage = "Correct"
 
-        Task {
-            try? await Task.sleep(for: .milliseconds(answerWasCorrect ? 700 : 1200))
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                showNextCard()
+            if !recordedWrongAttempt {
+                recordResult(for: card, wasCorrect: true)
+            }
+
+            Task {
+                try? await Task.sleep(for: .milliseconds(700))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    showNextCard()
+                }
+            }
+        } else {
+            answerFieldFocused = true
+            resultMessage = "Not quite. Try again, use the hint, or reveal the answer."
+
+            if !recordedWrongAttempt {
+                recordedWrongAttempt = true
+                recordResult(for: card, wasCorrect: false)
+            }
+
+            if meaningHint == nil && !isLoadingMeaningHint {
+                loadMeaningHint(for: card)
             }
         }
     }
@@ -265,7 +328,36 @@ struct QuizView: View {
         resultMessage = ""
         hasCheckedAnswer = false
         revealAnswer = false
+        meaningHint = nil
+        isLoadingMeaningHint = false
+        showLetterHint = false
+        recordedWrongAttempt = false
         answerFieldFocused = !practiceCards.isEmpty
+    }
+
+    func loadMeaningHint(for card: PracticeCard) {
+        guard backendConfiguration.isValid else { return }
+
+        isLoadingMeaningHint = true
+        Task {
+            let hint = try? await BackendAIService.shared.meaningHint(for: card.phrase, configuration: backendConfiguration)
+            await MainActor.run {
+                meaningHint = hint
+                isLoadingMeaningHint = false
+            }
+        }
+    }
+
+    func edgeLetterHint(for phrase: String) -> String {
+        phrase
+            .split(separator: " ")
+            .map { token in
+                let characters = Array(token)
+                guard let first = characters.first else { return "" }
+                guard characters.count > 1, let last = characters.last else { return String(first) }
+                return "\(first)…\(last)"
+            }
+            .joined(separator: " ")
     }
 
     func recordResult(for card: PracticeCard, wasCorrect: Bool) {
@@ -299,7 +391,7 @@ struct PracticeCard: Identifiable, Hashable {
 }
 
 enum SentenceGenerator {
-    static func cards(for phrase: String) -> [PracticeCard] {
+    nonisolated static func cards(for phrase: String) -> [PracticeCard] {
         let cleanedPhrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedPhrase.isEmpty else { return [] }
 
@@ -315,7 +407,7 @@ enum SentenceGenerator {
         }
     }
 
-    static func blankedSentence(from sentence: String, phrase: String) -> String? {
+    nonisolated static func blankedSentence(from sentence: String, phrase: String) -> String? {
         guard let range = sentence.range(of: phrase, options: [.caseInsensitive, .diacriticInsensitive]) else {
             return nil
         }
@@ -323,7 +415,7 @@ enum SentenceGenerator {
         return sentence.replacingCharacters(in: range, with: "______")
     }
 
-    private static func templates(for phrase: String) -> [(String) -> String] {
+    nonisolated private static func templates(for phrase: String) -> [(String) -> String] {
         switch guessKind(for: phrase) {
         case .adverb:
             return [
@@ -405,7 +497,7 @@ enum SentenceGenerator {
         }
     }
 
-    private static func guessKind(for phrase: String) -> PhraseKind {
+    nonisolated private static func guessKind(for phrase: String) -> PhraseKind {
         let lowercased = phrase.lowercased()
         let words = lowercased.split(separator: " ")
         let adjectiveSuffixes = ["ful", "ous", "ive", "al", "ic", "able", "ible", "less", "ent", "ant", "ary", "ory"]
@@ -514,23 +606,33 @@ enum PracticeCardFactory {
             return PracticeCardResult(cards: [], status: "Add a phrase to begin.")
         }
 
+        let sessionPhrases = selectedSessionPhrases(
+            from: cleanedPhrases,
+            phraseProgress: phraseProgress,
+            source: source
+        )
+
         if source == .ai {
             if configuration.isValid {
                 do {
                     let generatedCards = try await BackendSentenceProvider().cards(
-                        for: cleanedPhrases,
+                        for: sessionPhrases,
                         configuration: configuration
                     )
                     if !generatedCards.isEmpty {
                         return PracticeCardResult(
                             cards: weightedCards(from: generatedCards, phraseProgress: phraseProgress),
-                            status: statusText(for: phraseProgress, aiEnabled: true)
+                            status: statusText(
+                                for: phraseProgress,
+                                aiEnabled: true,
+                                base: aiSessionStatus(loadedPhraseCount: sessionPhrases.count, totalPhraseCount: cleanedPhrases.count)
+                            )
                         )
                     }
                 } catch {
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     return fallbackResult(
-                        phrases: cleanedPhrases,
+                        phrases: sessionPhrases,
                         phraseProgress: phraseProgress,
                         status: "AI failed (\(message)), using built-in sentence prompts instead."
                     )
@@ -538,16 +640,16 @@ enum PracticeCardFactory {
             }
 
             return fallbackResult(
-                phrases: cleanedPhrases,
+                phrases: sessionPhrases,
                 phraseProgress: phraseProgress,
                 status: "AI backend is not configured, using built-in sentence prompts."
             )
         }
 
         return fallbackResult(
-            phrases: cleanedPhrases,
+            phrases: sessionPhrases,
             phraseProgress: phraseProgress,
-            status: "Using built-in sentence prompts for instant practice."
+            status: "Using built-in sentence prompts because AI is unavailable."
         )
     }
 
@@ -576,6 +678,36 @@ enum PracticeCardFactory {
         }
 
         return weighted.shuffled()
+    }
+
+    private static func selectedSessionPhrases(
+        from phrases: [String],
+        phraseProgress: [String: PhraseProgress],
+        source: PracticeGenerationSource
+    ) -> [String] {
+        let maxPhrases = source == .ai ? 12 : 20
+        guard phrases.count > maxPhrases else { return phrases }
+
+        let reviewPhrases = phrases.filter {
+            phraseProgress[$0.normalizedProgressKey]?.needsReview == true
+        }
+        let untouchedPhrases = phrases.filter {
+            (phraseProgress[$0.normalizedProgressKey]?.totalAttempts ?? 0) == 0
+        }
+        let remainingPhrases = phrases.filter { phrase in
+            !reviewPhrases.contains(phrase) && !untouchedPhrases.contains(phrase)
+        }
+
+        let orderedPhrases = reviewPhrases + untouchedPhrases + remainingPhrases
+        return Array(orderedPhrases.prefix(maxPhrases))
+    }
+
+    private static func aiSessionStatus(loadedPhraseCount: Int, totalPhraseCount: Int) -> String {
+        guard totalPhraseCount > loadedPhraseCount else {
+            return "Using AI-generated sentence prompts."
+        }
+
+        return "Using AI-generated sentence prompts for \(loadedPhraseCount) of \(totalPhraseCount) phrases in this round."
     }
 
     private static func statusText(for phraseProgress: [String: PhraseProgress], aiEnabled: Bool, base: String? = nil) -> String {
@@ -638,26 +770,37 @@ enum PracticeGenerationSource {
 
 struct BackendSentenceProvider {
     func cards(for phrases: [String], configuration: BackendConfiguration) async throws -> [PracticeCard] {
-        var cards: [PracticeCard] = []
+        await withTaskGroup(of: [PracticeCard].self) { group in
+            for phrase in phrases {
+                group.addTask {
+                    do {
+                        let sentences = try await BackendAIService.shared.generateSentences(for: phrase, configuration: configuration)
+                        let phraseCards: [PracticeCard] = sentences.compactMap { sentence in
+                            guard let prompt = SentenceGenerator.blankedSentence(from: sentence, phrase: phrase) else {
+                                return nil
+                            }
 
-        for phrase in phrases {
-            let sentences = try await BackendAIService.shared.generateSentences(for: phrase, configuration: configuration)
-            let phraseCards: [PracticeCard] = sentences.compactMap { sentence in
-                guard let prompt = SentenceGenerator.blankedSentence(from: sentence, phrase: phrase) else {
-                    return nil
+                            return PracticeCard(phrase: phrase, prompt: prompt)
+                        }
+
+                        if phraseCards.isEmpty {
+                            return SentenceGenerator.cards(for: phrase)
+                        }
+
+                        return phraseCards
+                    } catch {
+                        return SentenceGenerator.cards(for: phrase)
+                    }
                 }
-
-                return PracticeCard(phrase: phrase, prompt: prompt)
             }
 
-            if phraseCards.isEmpty {
-                cards.append(contentsOf: SentenceGenerator.cards(for: phrase))
-            } else {
+            var cards: [PracticeCard] = []
+            for await phraseCards in group {
                 cards.append(contentsOf: phraseCards)
             }
-        }
 
-        return cards
+            return cards
+        }
     }
 }
 
