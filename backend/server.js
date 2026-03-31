@@ -77,6 +77,21 @@ const hintResponseSchema = {
     strict: true
 };
 
+const meaningResponseSchema = {
+    name: "phrase_definition",
+    schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+            meaning: {
+                type: "string"
+            }
+        },
+        required: ["meaning"]
+    },
+    strict: true
+};
+
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(express.json({ limit: "16kb" }));
@@ -289,6 +304,63 @@ app.post("/explain-phrase", async (request, response) => {
         logServerError("explain-phrase", error);
         response.status(503).json({
             error: "Meaning hint is temporarily unavailable."
+        });
+    }
+});
+
+app.post("/define-phrase", async (request, response) => {
+    const parsed = phraseRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+        response.status(400).json({
+            error: "Invalid request body."
+        });
+        return;
+    }
+
+    try {
+        const result = await openai.responses.create({
+            model: openAIModel,
+            input: [
+                {
+                    role: "system",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: [
+                                "You explain the meaning of an English word or phrase for language learners.",
+                                "Return a full but compact explanation in plain English.",
+                                "If the item is idiomatic or figurative, explain the figurative meaning clearly.",
+                                "Keep the answer to 2 or 3 sentences.",
+                                "Do not use bullet points."
+                            ].join(" ")
+                        }
+                    ]
+                },
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: `Give the full meaning of this English word or phrase: ${parsed.data.phrase}`
+                        }
+                    ]
+                }
+            ],
+            text: {
+                format: {
+                    type: "json_schema",
+                    ...meaningResponseSchema
+                }
+            }
+        });
+
+        const payload = extractJSONObject(result.output_text);
+        const parsedPayload = JSON.parse(payload);
+        response.json(parsedPayload);
+    } catch (error) {
+        logServerError("define-phrase", error);
+        response.status(503).json({
+            error: "Full meaning is temporarily unavailable."
         });
     }
 });

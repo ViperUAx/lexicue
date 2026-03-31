@@ -66,6 +66,19 @@ final class BackendAIService {
         return response.hint
     }
 
+    func fullMeaning(for phrase: String, configuration: BackendConfiguration) async throws -> String {
+        guard configuration.isValid else { throw BackendAIServiceError.missingConfiguration }
+
+        let payload = try await performRequest(
+            path: "define-phrase",
+            configuration: configuration,
+            requestBody: PhraseRequest(phrase: phrase)
+        )
+
+        let response = try JSONDecoder().decode(MeaningBundle.self, from: payload)
+        return response.meaning
+    }
+
     private func performRequest<RequestBody: Encodable>(
         path: String,
         configuration: BackendConfiguration,
@@ -111,6 +124,10 @@ private struct DifficultyBundle: Decodable {
 
 private struct HintBundle: Decodable {
     let hint: String
+}
+
+private struct MeaningBundle: Decodable {
+    let meaning: String
 }
 
 extension BackendAIServiceError: LocalizedError {

@@ -3,8 +3,10 @@ import SwiftUI
 struct QuizView: View {
     let savedPhrases: [String]
     @Binding var phraseProgress: [String: PhraseProgress]
+    @Binding var practiceHistory: [String: [PracticeLogEntry]]
     let practiceMode: PracticeMode
 
+    @Environment(\.dismiss) private var dismiss
     @State private var practiceCards: [PracticeCard] = []
     @State private var currentIndex = 0
     @State private var isLoading = false
@@ -19,6 +21,11 @@ struct QuizView: View {
     @State private var isLoadingMeaningHint = false
     @State private var showLetterHint = false
     @State private var recordedWrongAttempt = false
+    @State private var completionLogged = false
+    @State private var sessionCorrectCount = 0
+    @State private var sessionWrongCount = 0
+    @State private var showSessionSummary = false
+    @State private var currentSessionStartIndex = 0
     @State private var generationSource: PracticeGenerationSource = .ai
     @State private var isRefreshingCurrentCard = false
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
@@ -45,6 +52,8 @@ struct QuizView: View {
                             .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity, minHeight: 220)
+                } else if showSessionSummary, practiceMode == .all {
+                    sessionSummaryView
                 } else if practiceCards.isEmpty {
                     ContentUnavailableView(
                         practiceMode.emptyTitle,
@@ -190,6 +199,9 @@ struct QuizView: View {
         .navigationTitle(practiceMode.navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
+            if practiceMode == .all {
+                currentSessionStartIndex = 0
+            }
             refreshPracticeCardsIfNeeded()
         }
         .onDisappear {
@@ -224,14 +236,24 @@ struct QuizView: View {
         return phraseProgress[practiceCards[currentIndex].phrase.normalizedProgressKey]
     }
 
+    var sessionTotalCount: Int {
+        sessionCorrectCount + sessionWrongCount
+    }
+
+    var sessionSuccessRate: Double {
+        guard sessionTotalCount > 0 else { return 0 }
+        return Double(sessionCorrectCount) / Double(sessionTotalCount)
+    }
+
     func refreshPracticeCardsIfNeeded() {
-        guard practiceCards.isEmpty, !isLoading else { return }
+        guard practiceCards.isEmpty, !isLoading, !showSessionSummary else { return }
         refreshPracticeCards(using: .ai)
     }
 
     func refreshPracticeCards(using source: PracticeGenerationSource = .ai) {
         generationTask?.cancel()
         generationSource = source
+        showSessionSummary = false
         generationTask = Task {
             await generatePracticeCards()
         }
@@ -253,6 +275,7 @@ struct QuizView: View {
                 practiceMode: .all,
                 source: PracticeGenerationSource.ai,
                 configuration: backendConfiguration,
+                sessionStartIndex: 0,
                 progress: nil
             )
 
@@ -276,6 +299,18 @@ struct QuizView: View {
     func showNextCard() {
         guard !practiceCards.isEmpty else { return }
 
+        let currentCard = practiceCards[currentIndex]
+        let shouldCountAsCorrect = hasCheckedAnswer && isAnswerCorrect(for: currentCard)
+        let shouldCountAsWrong = !shouldCountAsCorrect && (recordedWrongAttempt || revealAnswer || hasCheckedAnswer)
+        if shouldCountAsWrong {
+            completeCardIfNeeded(currentCard, wasCorrect: false)
+        }
+
+        if practiceMode == .all, currentIndex + 1 >= practiceCards.count {
+            showSessionSummary = true
+            return
+        }
+
         currentIndex = (currentIndex + 1) % practiceCards.count
         resetCardState()
     }
@@ -285,6 +320,8 @@ struct QuizView: View {
         isLoading = true
         loadingProgress = 0
         currentIndex = 0
+        sessionCorrectCount = 0
+        sessionWrongCount = 0
         resetCardState()
         generationStatus = "Choosing phrases for this round."
 
@@ -294,6 +331,7 @@ struct QuizView: View {
             practiceMode: practiceMode,
             source: generationSource,
             configuration: backendConfiguration,
+            sessionStartIndex: currentSessionStartIndex,
             progress: { completed, total in
                 await MainActor.run {
                     loadingProgress = total > 0 ? Double(completed) / Double(total) : 0
@@ -324,6 +362,8 @@ struct QuizView: View {
             if !recordedWrongAttempt {
                 recordResult(for: card, wasCorrect: true)
             }
+
+            completeCardIfNeeded(card, wasCorrect: true)
 
             Task {
                 try? await Task.sleep(for: .milliseconds(700))
@@ -360,7 +400,34 @@ struct QuizView: View {
         isLoadingMeaningHint = false
         showLetterHint = false
         recordedWrongAttempt = false
+        completionLogged = false
         answerFieldFocused = !practiceCards.isEmpty
+    }
+
+    func completeCardIfNeeded(_ card: PracticeCard, wasCorrect: Bool) {
+        guard !completionLogged else { return }
+
+        completionLogged = true
+        if wasCorrect {
+            sessionCorrectCount += 1
+        } else {
+            sessionWrongCount += 1
+        }
+
+        let key = card.phrase.normalizedProgressKey
+        var entries = practiceHistory[key] ?? []
+        entries.insert(
+            PracticeLogEntry(
+                sentence: completedSentence(for: card),
+                wasCorrect: wasCorrect
+            ),
+            at: 0
+        )
+        practiceHistory[key] = Array(entries.prefix(20))
+    }
+
+    func completedSentence(for card: PracticeCard) -> String {
+        card.prompt.replacingOccurrences(of: "______", with: card.phrase)
     }
 
     func loadMeaningHint(for card: PracticeCard) {
@@ -386,6 +453,50 @@ struct QuizView: View {
                 return "\(first)…\(last)"
             }
             .joined(separator: " ")
+    }
+
+    func startNextSession() {
+        guard practiceMode == .all else { return }
+
+        let phraseCount = max(1, activePhrases.count)
+        currentSessionStartIndex = (currentSessionStartIndex + 10) % phraseCount
+        practiceCards = []
+        refreshPracticeCards(using: .ai)
+    }
+
+    var sessionSummaryView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Session Complete")
+                .font(.title)
+                .fontWeight(.bold)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Success performance")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+
+                Text("\(Int((sessionSuccessRate * 100).rounded()))%")
+                    .font(.system(size: 48, weight: .bold))
+
+                Text("Correct \(sessionCorrectCount) • Missed \(sessionWrongCount)")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("Next Session") {
+                startNextSession()
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button("Main Menu") {
+                dismiss()
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
     func recordResult(for card: PracticeCard, wasCorrect: Bool) {
@@ -626,6 +737,7 @@ enum PracticeCardFactory {
         practiceMode: PracticeMode,
         source: PracticeGenerationSource,
         configuration: BackendConfiguration,
+        sessionStartIndex: Int,
         progress: (@Sendable (_ completed: Int, _ total: Int) async -> Void)?
     ) async -> PracticeCardResult {
         let cleanedPhrases = phrases
@@ -640,7 +752,8 @@ enum PracticeCardFactory {
             from: cleanedPhrases,
             phraseProgress: phraseProgress,
             practiceMode: practiceMode,
-            source: source
+            source: source,
+            sessionStartIndex: sessionStartIndex
         )
 
         if source == .ai {
@@ -712,7 +825,7 @@ enum PracticeCardFactory {
     private static func finalizedCards(from cards: [PracticeCard], phraseProgress: [String: PhraseProgress], practiceMode: PracticeMode) -> [PracticeCard] {
         switch practiceMode {
         case .all:
-            return repeatedRoundCards(from: cards, repeatsPerPhrase: 3)
+            return repeatedRoundCards(from: cards, repeatsPerPhrase: 2)
         case .review:
             return weightedCards(from: cards, phraseProgress: phraseProgress)
         }
@@ -768,10 +881,11 @@ enum PracticeCardFactory {
         from phrases: [String],
         phraseProgress: [String: PhraseProgress],
         practiceMode: PracticeMode,
-        source: PracticeGenerationSource
+        source: PracticeGenerationSource,
+        sessionStartIndex: Int
     ) -> [String] {
         if practiceMode == .all {
-            return Array(phrases.shuffled().prefix(min(10, phrases.count)))
+            return circularSessionPhrases(from: phrases, startIndex: sessionStartIndex, count: min(10, phrases.count))
         }
 
         let maxPhrases = source == .ai ? 12 : 20
@@ -789,6 +903,15 @@ enum PracticeCardFactory {
 
         let orderedPhrases = reviewPhrases + untouchedPhrases + remainingPhrases
         return Array(orderedPhrases.prefix(maxPhrases))
+    }
+
+    private static func circularSessionPhrases(from phrases: [String], startIndex: Int, count: Int) -> [String] {
+        guard !phrases.isEmpty else { return [] }
+
+        return (0..<count).map { offset in
+            let index = (startIndex + offset) % phrases.count
+            return phrases[index]
+        }
     }
 
     private static func aiSessionStatus(loadedPhraseCount: Int, totalPhraseCount: Int) -> String {
@@ -913,6 +1036,7 @@ struct BackendSentenceProvider {
             phraseProgress: .constant([
                 "laser-focused": PhraseProgress(correctCount: 2, wrongCount: 4)
             ]),
+            practiceHistory: .constant([:]),
             practiceMode: .all
         )
     }
