@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var practiceHistory: [String: [PracticeLogEntry]] = [:]
     @State private var showAISettings = false
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
+    private let appFont = Font.custom("Helvetica Neue", size: 17)
 
     let defaultPhrases = [
         "laser-focused",
@@ -17,6 +18,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             dashboardView
+            .environment(\.font, appFont)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("AI") {
@@ -86,45 +88,25 @@ struct ContentView: View {
     var actionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             practiceAllLink
-            reviewLink
             manageWordsLink
         }
     }
 
     var practiceAllLink: some View {
         NavigationLink {
-            QuizView(
+            PracticeModesView(
                 savedPhrases: savedPhrases,
                 phraseProgress: $phraseProgress,
-                practiceHistory: $practiceHistory,
-                practiceMode: .all
+                practiceHistory: $practiceHistory
             )
         } label: {
             actionRow(
                 title: "Practice All",
-                subtitle: "AI sessions from your saved phrase list",
+                subtitle: "Choose random, weakest, or search mode",
                 tint: .blue
             )
         }
         .disabled(savedPhrases.isEmpty)
-    }
-
-    var reviewLink: some View {
-        NavigationLink {
-            QuizView(
-                savedPhrases: savedPhrases,
-                phraseProgress: $phraseProgress,
-                practiceHistory: $practiceHistory,
-                practiceMode: .review
-            )
-        } label: {
-            actionRow(
-                title: "Review Weak Phrases",
-                subtitle: "Focus on items you miss more often",
-                tint: .orange
-            )
-        }
-        .disabled(phrasesNeedingReviewCount == 0)
     }
 
     var manageWordsLink: some View {
@@ -349,6 +331,92 @@ struct AISettingsView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+struct PracticeModesView: View {
+    let savedPhrases: [String]
+    @Binding var phraseProgress: [String: PhraseProgress]
+    @Binding var practiceHistory: [String: [PracticeLogEntry]]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                modeLink(
+                    title: "Random Mode",
+                    subtitle: "10 random phrases, 2 cards each",
+                    practiceMode: .random,
+                    tint: .blue
+                )
+
+                modeLink(
+                    title: "Weakest Phrases Mode",
+                    subtitle: "10 random phrases between 1% and 50% success",
+                    practiceMode: .weakest,
+                    tint: .orange
+                )
+
+                modeLink(
+                    title: "Search Mode",
+                    subtitle: "Guess the original phrase from an italic synonym",
+                    practiceMode: .search,
+                    tint: .purple
+                )
+            }
+            .padding()
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("Practice Modes")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    func modeLink(title: String, subtitle: String, practiceMode: PracticeMode, tint: Color) -> some View {
+        NavigationLink {
+            QuizView(
+                savedPhrases: savedPhrases,
+                phraseProgress: $phraseProgress,
+                practiceHistory: $practiceHistory,
+                practiceMode: practiceMode
+            )
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(tint)
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+        }
+        .disabled(isDisabled(practiceMode))
+    }
+
+    func isDisabled(_ mode: PracticeMode) -> Bool {
+        switch mode {
+        case .random, .search:
+            return savedPhrases.isEmpty
+        case .weakest:
+            return weakestCandidates.isEmpty
+        }
+    }
+
+    var weakestCandidates: [String] {
+        savedPhrases.filter {
+            let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
+            return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
         }
     }
 }

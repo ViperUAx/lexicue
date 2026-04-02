@@ -25,22 +25,38 @@ const phraseRequestSchema = z.object({
     phrase: z.string().trim().min(1).max(120)
 });
 
+const generationRequestSchema = z.object({
+    phrase: z.string().trim().min(1).max(120),
+    mode: z.enum(["random", "weakest", "search"]),
+    previousSentences: z.array(z.string().trim().min(1).max(280)).max(20).default([])
+});
+
 const sentenceResponseSchema = {
-    name: "sentence_bundle",
+    name: "generated_card_bundle",
     schema: {
         type: "object",
         additionalProperties: false,
         properties: {
-            sentences: {
+            cards: {
                 type: "array",
                 minItems: 4,
                 maxItems: 4,
                 items: {
-                    type: "string"
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        sentence: {
+                            type: "string"
+                        },
+                        highlightedText: {
+                            type: "string"
+                        }
+                    },
+                    required: ["sentence", "highlightedText"]
                 }
             }
         },
-        required: ["sentences"]
+        required: ["cards"]
     },
     strict: true
 };
@@ -127,7 +143,7 @@ app.get("/health", (_request, response) => {
 });
 
 app.post("/generate-sentence", async (request, response) => {
-    const parsed = phraseRequestSchema.safeParse(request.body);
+    const parsed = generationRequestSchema.safeParse(request.body);
     if (!parsed.success) {
         response.status(400).json({
             error: "Invalid request body."
@@ -144,17 +160,7 @@ app.post("/generate-sentence", async (request, response) => {
                     content: [
                         {
                             type: "input_text",
-                            text: [
-                                "You create short, natural sentence prompts for English vocabulary practice.",
-                                "Return exactly four English sentences.",
-                                "Each sentence must contain the target phrase exactly once.",
-                                "The learner must be able to answer with the exact saved phrase unchanged.",
-                                "Do not require any tense change, plural change, article change, or other grammatical transformation.",
-                                "If the phrase is a base-form verb or verb phrase, write the sentence so that the base form fits naturally as written.",
-                                "Keep sentences clear, natural, and between 8 and 20 words.",
-                                "Use the phrase naturally, not as a dictionary definition.",
-                                "Reject any sentence where the exact phrase would sound ungrammatical when inserted into the blank."
-                            ].join(" ")
+                            text: buildSentenceSystemPrompt(parsed.data.mode)
                         }
                     ]
                 },
@@ -163,7 +169,11 @@ app.post("/generate-sentence", async (request, response) => {
                     content: [
                         {
                             type: "input_text",
-                            text: `Generate four different natural usage sentences for this exact phrase: ${parsed.data.phrase}`
+                            text: buildSentenceUserPrompt(
+                                parsed.data.phrase,
+                                parsed.data.mode,
+                                parsed.data.previousSentences
+                            )
                         }
                     ]
                 }
@@ -393,4 +403,60 @@ function extractJSONObject(outputText) {
 
 function logServerError(scope, error) {
     console.error(`[${scope}]`, error);
+}
+
+function buildSentenceSystemPrompt(mode) {
+    const sharedRules = [
+        "You create natural English vocabulary practice cards.",
+        "Return exactly four cards.",
+        "Every sentence must be between 20 and 30 words.",
+        "Each card must use a different situation, structure, and wording from the others.",
+        "Avoid repeating openings, grammar frames, or near-duplicate sentence patterns.",
+        "Do not write dictionary-style definitions."
+    ];
+
+    if (mode === "search") {
+        return [
+            ...sharedRules,
+            "This is search mode.",
+            "The learner must guess the original saved phrase, not a missing blank.",
+            "Do not include the original phrase in the sentence.",
+            "Instead, include one natural synonym or near-synonymous wording that fits the sentence.",
+            "Return that synonym or substitute in highlightedText exactly as it appears in the sentence.",
+            "The sentence must stay fully grammatical and natural."
+        ].join(" ");
+    }
+
+    return [
+        ...sharedRules,
+        "This is fill-in-the-blank mode.",
+        "Each sentence must contain the target phrase exactly once.",
+        "The learner must be able to answer with the exact saved phrase unchanged.",
+        "Do not require any tense change, plural change, article change, or other grammatical transformation.",
+        "If the phrase is a base-form verb or verb phrase, write the sentence so that the exact phrase fits naturally as written.",
+        "Return highlightedText as an empty string."
+    ].join(" ");
+}
+
+function buildSentenceUserPrompt(phrase, mode, previousSentences) {
+    const previousBlock = previousSentences.length > 0
+        ? `Avoid sentences that are logically or structurally similar to these previous practice sentences:\n- ${previousSentences.join("\n- ")}`
+        : "There are no previous sentences to avoid yet.";
+
+    if (mode === "search") {
+        return [
+            `Generate four search-mode cards for this saved phrase: ${phrase}.`,
+            "The learner should infer the original saved phrase from a synonym or near-synonymous wording used in the sentence.",
+            "Return each card as { sentence, highlightedText }.",
+            "highlightedText must be the exact synonym substring present in sentence.",
+            previousBlock
+        ].join(" ");
+    }
+
+    return [
+        `Generate four fill-in-the-blank cards for this exact saved phrase: ${phrase}.`,
+        "Return each card as { sentence, highlightedText }.",
+        "highlightedText must be an empty string for every card.",
+        previousBlock
+    ].join(" ");
 }

@@ -9,55 +9,27 @@ struct MyWordsView: View {
     @Binding var phraseMeanings: [String: String]
     @Binding var practiceHistory: [String: [PracticeLogEntry]]
 
-    @State private var newPhrase = ""
     @State private var pastedPhrases = ""
     @State private var importMessage = ""
     @FocusState private var focusedField: Field?
+    private let appFont = Font.custom("Helvetica Neue", size: 17)
 
     enum Field {
-        case singlePhrase
         case pastedList
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                addSinglePhraseSection
                 importSection
                 savedPhrasesSection
             }
             .padding()
         }
+        .environment(\.font, appFont)
         .background(Color(.systemGroupedBackground))
         .navigationTitle("My Phrases")
         .navigationBarTitleDisplayMode(.inline)
-    }
-
-    var addSinglePhraseSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Add one word or phrase")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-
-            TextField("Enter a phrase", text: $newPhrase)
-                .padding(14)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .textInputAutocapitalization(.never)
-                .keyboardType(.asciiCapable)
-                .autocorrectionDisabled()
-                .focused($focusedField, equals: .singlePhrase)
-                .submitLabel(.done)
-                .onSubmit {
-                    addPhrase()
-                }
-
-            Button("Add Phrase") {
-                addPhrase()
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(newPhrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
     }
 
     var importSection: some View {
@@ -139,18 +111,14 @@ struct MyWordsView: View {
                                 )
                             } label: {
                                 HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text(phrase)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .foregroundStyle(.primary)
+                                    Text(phrase)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .foregroundStyle(.primary)
 
-                                        HStack(spacing: 8) {
-                                            AttemptCountBadge(value: progress.correctCount, tint: .green)
-                                            AttemptCountBadge(value: progress.wrongCount, tint: .red)
-                                        }
+                                    HStack(spacing: 8) {
+                                        AttemptCountBadge(value: progress.correctCount, tint: .green)
+                                        AttemptCountBadge(value: progress.wrongCount, tint: .red)
                                     }
-
-                                    SuccessRateBadge(progress: progress)
                                 }
                             }
                             .buttonStyle(.plain)
@@ -180,21 +148,6 @@ struct MyWordsView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16))
             }
         }
-    }
-
-    func addPhrase() {
-        let cleaned = newPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-
-        if !containsPhrase(cleaned) {
-            savedPhrases.append(cleaned)
-            importMessage = "Added 1 phrase."
-        } else {
-            importMessage = "That phrase is already saved."
-        }
-
-        newPhrase = ""
-        focusedField = .singlePhrase
     }
 
     func importPhrases() {
@@ -248,6 +201,7 @@ struct PhraseEncyclopediaView: View {
 
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     @State private var isLoadingMeaning = false
+    private let appFont = Font.custom("Helvetica Neue", size: 17)
 
     var body: some View {
         ScrollView {
@@ -278,7 +232,7 @@ struct PhraseEncyclopediaView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18))
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Last 20 completed sentences")
+                    Text("Last 20 practice attempts")
                         .font(.headline)
                         .foregroundStyle(.secondary)
 
@@ -292,7 +246,7 @@ struct PhraseEncyclopediaView: View {
                     } else {
                         VStack(spacing: 10) {
                             ForEach(recentHistory) { entry in
-                                Text(entry.sentence)
+                                Text(highlightedSentence(entry.sentence))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding()
                                     .background(entry.wasCorrect ? Color.green.opacity(0.12) : Color.red.opacity(0.12))
@@ -304,6 +258,7 @@ struct PhraseEncyclopediaView: View {
             }
             .padding()
         }
+        .environment(\.font, appFont)
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Encyclopedia")
         .navigationBarTitleDisplayMode(.inline)
@@ -335,6 +290,23 @@ struct PhraseEncyclopediaView: View {
             phraseMeanings[key] = meaning
         }
     }
+
+    func highlightedSentence(_ sentence: String) -> AttributedString {
+        var attributed = AttributedString(sentence)
+        let escapedPhrase = NSRegularExpression.escapedPattern(for: phrase)
+
+        guard
+            let regex = try? NSRegularExpression(pattern: escapedPhrase, options: [.caseInsensitive]),
+            let match = regex.firstMatch(in: sentence, range: NSRange(sentence.startIndex..., in: sentence)),
+            let range = Range(match.range, in: sentence),
+            let attributedRange = Range(range, in: attributed)
+        else {
+            return attributed
+        }
+
+        attributed[attributedRange].font = .body.bold()
+        return attributed
+    }
 }
 
 struct AttemptCountBadge: View {
@@ -348,40 +320,6 @@ struct AttemptCountBadge: View {
             .frame(width: 24, height: 24)
             .background(tint)
             .clipShape(Circle())
-    }
-}
-
-struct SuccessRateBadge: View {
-    let progress: PhraseProgress
-
-    var body: some View {
-        Text(progress.totalAttempts > 0 ? "\(Int(progress.successRate * 100))%" : "-%")
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(successTint(for: progress))
-            .clipShape(Capsule())
-            .frame(minWidth: 48, alignment: .trailing)
-    }
-
-    func successTint(for progress: PhraseProgress) -> Color {
-        guard progress.totalAttempts > 0 else { return .gray.opacity(0.6) }
-
-        let rate = progress.successRate
-        if rate >= 0.85 {
-            return Color(red: 0.05, green: 0.65, blue: 0.18)
-        }
-        if rate >= 0.65 {
-            return Color(red: 0.36, green: 0.74, blue: 0.25)
-        }
-        if rate >= 0.45 {
-            return Color(red: 0.78, green: 0.68, blue: 0.18)
-        }
-        if rate >= 0.25 {
-            return Color(red: 0.86, green: 0.44, blue: 0.18)
-        }
-        return Color(red: 0.80, green: 0.18, blue: 0.18)
     }
 }
 

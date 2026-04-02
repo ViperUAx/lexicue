@@ -27,17 +27,26 @@ enum BackendAIServiceError: Error {
 final class BackendAIService {
     static let shared = BackendAIService()
 
-    func generateSentences(for phrase: String, configuration: BackendConfiguration) async throws -> [String] {
+    func generatePracticeCards(
+        for phrase: String,
+        mode: PracticeMode,
+        previousSentences: [String],
+        configuration: BackendConfiguration
+    ) async throws -> [GeneratedSentenceCard] {
         guard configuration.isValid else { throw BackendAIServiceError.missingConfiguration }
 
         let payload = try await performRequest(
             path: "generate-sentence",
             configuration: configuration,
-            requestBody: PhraseRequest(phrase: phrase)
+            requestBody: PracticeGenerationRequest(
+                phrase: phrase,
+                mode: mode.backendMode,
+                previousSentences: Array(previousSentences.prefix(20))
+            )
         )
 
-        let response = try JSONDecoder().decode(SentenceBundle.self, from: payload)
-        return response.sentences
+        let response = try JSONDecoder().decode(GeneratedSentenceBundle.self, from: payload)
+        return response.cards
     }
 
     func assessDifficulty(for phrase: String, configuration: BackendConfiguration) async throws -> Int {
@@ -114,8 +123,19 @@ private struct PhraseRequest: Encodable {
     let phrase: String
 }
 
-private struct SentenceBundle: Decodable {
-    let sentences: [String]
+private struct PracticeGenerationRequest: Encodable {
+    let phrase: String
+    let mode: String
+    let previousSentences: [String]
+}
+
+struct GeneratedSentenceCard: Decodable {
+    let sentence: String
+    let highlightedText: String
+}
+
+private struct GeneratedSentenceBundle: Decodable {
+    let cards: [GeneratedSentenceCard]
 }
 
 private struct DifficultyBundle: Decodable {
