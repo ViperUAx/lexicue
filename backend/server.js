@@ -422,6 +422,10 @@ function buildSentenceSystemPrompt(mode) {
             "The learner must guess the original saved phrase, not a missing blank.",
             "Do not include the original phrase in the sentence.",
             "Instead, include one natural synonym or near-synonymous wording that fits the sentence.",
+            "The synonym must have the same grammatical role and structure as the original phrase.",
+            "The original phrase must be able to replace the synonym directly without changing any other words in the sentence.",
+            "Do not change tense, modality, person, number, or clause structure when choosing the synonym.",
+            "Avoid paraphrases that only match the meaning loosely but would make the original phrase sound unnatural or ungrammatical.",
             "Return that synonym or substitute in highlightedText exactly as it appears in the sentence.",
             "The sentence must stay fully grammatical and natural."
         ].join(" ");
@@ -447,6 +451,7 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
         return [
             `Generate four search-mode cards for this saved phrase: ${phrase}.`,
             "The learner should infer the original saved phrase from a synonym or near-synonymous wording used in the sentence.",
+            "The original phrase must be able to replace the highlighted wording directly and still sound grammatical and natural.",
             "Return each card as { sentence, highlightedText }.",
             "highlightedText must be the exact synonym substring present in sentence.",
             previousBlock
