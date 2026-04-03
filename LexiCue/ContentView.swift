@@ -373,35 +373,55 @@ struct PracticeModesView: View {
 
     @ViewBuilder
     func modeLink(title: String, subtitle: String, practiceMode: PracticeMode, tint: Color) -> some View {
-        NavigationLink {
-            QuizView(
-                savedPhrases: savedPhrases,
-                phraseProgress: $phraseProgress,
-                practiceHistory: $practiceHistory,
-                practiceMode: practiceMode
-            )
-        } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Image(systemName: "arrow.right.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(tint)
+        if practiceMode == .weakest {
+            NavigationLink {
+                QuizView(
+                    savedPhrases: savedPhrases,
+                    phraseProgress: $phraseProgress,
+                    practiceHistory: $practiceHistory,
+                    practiceMode: practiceMode,
+                    phraseScope: .all,
+                    selectedPhraseKeys: []
+                )
+            } label: {
+                modeRow(title: title, subtitle: subtitle, tint: tint)
             }
-            .padding()
-            .background(Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .disabled(isDisabled(practiceMode))
+        } else {
+            NavigationLink {
+                PracticeScopePickerView(
+                    savedPhrases: savedPhrases,
+                    phraseProgress: $phraseProgress,
+                    practiceHistory: $practiceHistory,
+                    practiceMode: practiceMode
+                )
+            } label: {
+                modeRow(title: title, subtitle: subtitle, tint: tint)
+            }
+            .disabled(isDisabled(practiceMode))
         }
-        .disabled(isDisabled(practiceMode))
+    }
+
+    func modeRow(title: String, subtitle: String, tint: Color) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "arrow.right.circle.fill")
+                .font(.title2)
+                .foregroundStyle(tint)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
     }
 
     func isDisabled(_ mode: PracticeMode) -> Bool {
@@ -417,6 +437,185 @@ struct PracticeModesView: View {
         savedPhrases.filter {
             let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
             return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
+        }
+    }
+}
+
+enum PracticePhraseScope: String, Hashable, Codable {
+    case all
+    case selected
+
+    var title: String {
+        switch self {
+        case .all:
+            return "All Phrases"
+        case .selected:
+            return "Selected Phrases"
+        }
+    }
+
+    var cycleKeySuffix: String {
+        rawValue
+    }
+}
+
+struct PracticeScopePickerView: View {
+    let savedPhrases: [String]
+    @Binding var phraseProgress: [String: PhraseProgress]
+    @Binding var practiceHistory: [String: [PracticeLogEntry]]
+    let practiceMode: PracticeMode
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                NavigationLink {
+                    QuizView(
+                        savedPhrases: savedPhrases,
+                        phraseProgress: $phraseProgress,
+                        practiceHistory: $practiceHistory,
+                        practiceMode: practiceMode,
+                        phraseScope: .all,
+                        selectedPhraseKeys: []
+                    )
+                } label: {
+                    scopeRow(
+                        title: "All Phrases",
+                        subtitle: "Use the full phrase collection in this mode.",
+                        tint: practiceMode == .random ? .blue : .purple
+                    )
+                }
+
+                NavigationLink {
+                    PracticePhraseSelectionView(
+                        savedPhrases: savedPhrases,
+                        phraseProgress: $phraseProgress,
+                        practiceHistory: $practiceHistory,
+                        practiceMode: practiceMode
+                    )
+                } label: {
+                    scopeRow(
+                        title: "Selected Phrases",
+                        subtitle: "Quickly flag the phrases you want to practise.",
+                        tint: practiceMode == .random ? .blue : .purple
+                    )
+                }
+            }
+            .padding()
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle(practiceMode.navigationTitle)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    func scopeRow(title: String, subtitle: String, tint: Color) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "arrow.right.circle.fill")
+                .font(.title2)
+                .foregroundStyle(tint)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+}
+
+struct PracticePhraseSelectionView: View {
+    let savedPhrases: [String]
+    @Binding var phraseProgress: [String: PhraseProgress]
+    @Binding var practiceHistory: [String: [PracticeLogEntry]]
+    let practiceMode: PracticeMode
+
+    @State private var selectedKeys: Set<String> = []
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("\(selectedKeys.count) selected")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Select All") {
+                        selectedKeys = Set(savedPhrases.map(\.normalizedProgressKey))
+                    }
+                    .font(.subheadline)
+
+                    Button("Clear") {
+                        selectedKeys = []
+                    }
+                    .font(.subheadline)
+                }
+
+                VStack(spacing: 0) {
+                    ForEach(savedPhrases, id: \.self) { phrase in
+                        Button {
+                            toggle(phrase)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: selectedKeys.contains(phrase.normalizedProgressKey) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedKeys.contains(phrase.normalizedProgressKey) ? .blue : .secondary)
+
+                                Text(phrase)
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if phrase != savedPhrases.last {
+                            Divider()
+                                .padding(.leading, 14)
+                        }
+                    }
+                }
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                NavigationLink {
+                    QuizView(
+                        savedPhrases: savedPhrases,
+                        phraseProgress: $phraseProgress,
+                        practiceHistory: $practiceHistory,
+                        practiceMode: practiceMode,
+                        phraseScope: .selected,
+                        selectedPhraseKeys: Array(selectedKeys)
+                    )
+                } label: {
+                    Text("Start Practice")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedKeys.isEmpty)
+            }
+            .padding()
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("Select Phrases")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    func toggle(_ phrase: String) {
+        let key = phrase.normalizedProgressKey
+        if selectedKeys.contains(key) {
+            selectedKeys.remove(key)
+        } else {
+            selectedKeys.insert(key)
         }
     }
 }

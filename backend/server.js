@@ -412,7 +412,9 @@ function buildSentenceSystemPrompt(mode) {
         "Every sentence must be between 20 and 30 words.",
         "Each card must use a different situation, structure, and wording from the others.",
         "Avoid repeating openings, grammar frames, or near-duplicate sentence patterns.",
-        "Do not write dictionary-style definitions."
+        "Do not write dictionary-style definitions.",
+        "Do not write meta-language about vocabulary, examples, phrases, or grammar.",
+        "Prefer natural real-world situations instead of explanation-style sentences."
     ];
 
     if (mode === "search") {
@@ -424,7 +426,7 @@ function buildSentenceSystemPrompt(mode) {
             "Instead, include one natural synonym or near-synonymous wording that fits the sentence.",
             "The synonym must have the same grammatical role and structure as the original phrase.",
             "The original phrase must be able to replace the synonym directly without changing any other words in the sentence.",
-            "Do not change tense, modality, person, number, or clause structure when choosing the synonym.",
+            "Do not change tense, aspect, modality, person, number, or clause structure when choosing the synonym.",
             "Avoid paraphrases that only match the meaning loosely but would make the original phrase sound unnatural or ungrammatical.",
             "Return that synonym or substitute in highlightedText exactly as it appears in the sentence.",
             "The sentence must stay fully grammatical and natural."
@@ -436,8 +438,9 @@ function buildSentenceSystemPrompt(mode) {
         "This is fill-in-the-blank mode.",
         "Each sentence must contain the target phrase exactly once.",
         "The learner must be able to answer with the exact saved phrase unchanged.",
-        "Do not require any tense change, plural change, article change, or other grammatical transformation.",
+        "Do not require any tense change, aspect change, plural change, article change, word order change, or other grammatical transformation.",
         "If the phrase is a base-form verb or verb phrase, write the sentence so that the exact phrase fits naturally as written.",
+        "If inserting the exact saved phrase would be ungrammatical, reject that sentence idea and write a different one.",
         "Return highlightedText as an empty string."
     ].join(" ");
 }
@@ -452,6 +455,7 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
             `Generate four search-mode cards for this saved phrase: ${phrase}.`,
             "The learner should infer the original saved phrase from a synonym or near-synonymous wording used in the sentence.",
             "The original phrase must be able to replace the highlighted wording directly and still sound grammatical and natural.",
+            "Make all four cards clearly different in setting, logic, and sentence structure.",
             "Return each card as { sentence, highlightedText }.",
             "highlightedText must be the exact synonym substring present in sentence.",
             previousBlock
@@ -460,6 +464,7 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
 
     return [
         `Generate four fill-in-the-blank cards for this exact saved phrase: ${phrase}.`,
+        "Make all four cards clearly different in setting, logic, and sentence structure.",
         "Return each card as { sentence, highlightedText }.",
         "highlightedText must be an empty string for every card.",
         previousBlock
