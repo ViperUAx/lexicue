@@ -90,6 +90,12 @@ struct MyWordsView: View {
                 }
             }
 
+            if !savedPhrases.isEmpty {
+                Text("Tap any phrase to open its encyclopedia with detailed success stats and phrase history.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             if savedPhrases.isEmpty {
                 Text("No phrases yet. Add one manually or paste a list above.")
                     .foregroundStyle(.secondary)
@@ -100,26 +106,18 @@ struct MyWordsView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(savedPhrases, id: \.self) { phrase in
-                        let progress = phraseProgress[phrase.normalizedProgressKey] ?? PhraseProgress()
-
                         HStack(spacing: 12) {
                             NavigationLink {
                                 PhraseEncyclopediaView(
                                     phrase: phrase,
+                                    phraseProgress: $phraseProgress,
                                     phraseMeanings: $phraseMeanings,
                                     practiceHistory: $practiceHistory
                                 )
                             } label: {
-                                HStack(spacing: 12) {
-                                    Text(phrase)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .foregroundStyle(.primary)
-
-                                    HStack(spacing: 8) {
-                                        AttemptCountBadge(value: progress.correctCount, tint: .green)
-                                        AttemptCountBadge(value: progress.wrongCount, tint: .red)
-                                    }
-                                }
+                                Text(phrase)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .foregroundStyle(.primary)
                             }
                             .buttonStyle(.plain)
 
@@ -196,6 +194,7 @@ struct MyWordsView: View {
 
 struct PhraseEncyclopediaView: View {
     let phrase: String
+    @Binding var phraseProgress: [String: PhraseProgress]
     @Binding var phraseMeanings: [String: String]
     @Binding var practiceHistory: [String: [PracticeLogEntry]]
 
@@ -209,6 +208,33 @@ struct PhraseEncyclopediaView: View {
                 Text(phrase)
                     .font(.largeTitle)
                     .fontWeight(.bold)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Success Stats")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 10) {
+                        AttemptCountBadge(value: currentProgress.correctCount, tint: .green)
+                        Text("Correct")
+                            .foregroundStyle(.secondary)
+
+                        AttemptCountBadge(value: currentProgress.wrongCount, tint: .red)
+                        Text("Missed")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        Text("Success rate")
+                            .foregroundStyle(.secondary)
+                        Text(successRateText)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(successRateColor)
+                    }
+                }
+                .padding()
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Meaning")
@@ -269,6 +295,20 @@ struct PhraseEncyclopediaView: View {
 
     var storedMeaning: String {
         phraseMeanings[phrase.normalizedProgressKey] ?? "Meaning not loaded yet."
+    }
+
+    var currentProgress: PhraseProgress {
+        phraseProgress[phrase.normalizedProgressKey] ?? PhraseProgress()
+    }
+
+    var successRateText: String {
+        guard currentProgress.totalAttempts > 0 else { return "—" }
+        return "\(Int((currentProgress.successRate * 100).rounded()))%"
+    }
+
+    var successRateColor: Color {
+        guard currentProgress.totalAttempts > 0 else { return .secondary }
+        return currentProgress.successRate >= 0.5 ? .green : .red
     }
 
     var recentHistory: [PracticeLogEntry] {

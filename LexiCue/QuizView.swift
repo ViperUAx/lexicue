@@ -27,7 +27,7 @@ struct QuizView: View {
     @State private var showSessionSummary = false
     @State private var generationSource: PracticeGenerationSource = .ai
     @State private var isRefreshingCurrentCard = false
-    @State private var revealedPromptCharacterCount = 0
+    @State private var revealedPromptCharacterBudget = 0
     @State private var promptRevealTask: Task<Void, Never>?
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     @FocusState private var answerFieldFocused: Bool
@@ -201,23 +201,14 @@ struct QuizView: View {
     }
 
     var activePhrases: [String] {
-        let scopedPhrases: [String]
         switch phraseScope {
         case .all:
-            scopedPhrases = savedPhrases
+            return savedPhrases
         case .selected:
-            let selectedKeys = Set(selectedPhraseKeys)
-            scopedPhrases = savedPhrases.filter { selectedKeys.contains($0.normalizedProgressKey) }
-        }
-
-        switch practiceMode {
-        case .random, .search:
-            return scopedPhrases
-        case .weakest:
-            return scopedPhrases.filter {
-                let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
-                return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
-            }
+            let chosenKeys = Set(selectedPhraseKeys)
+            return savedPhrases.filter { chosenKeys.contains($0.normalizedProgressKey) }
+        case .lessPlayed, .weakest:
+            return savedPhrases
         }
     }
 
@@ -252,28 +243,18 @@ struct QuizView: View {
     func refreshCurrentCard() {
         guard !practiceCards.isEmpty else { return }
 
-        let phrase = practiceCards[currentIndex].phrase
-        let currentPrompt = practiceCards[currentIndex].prompt
+        let currentCard = practiceCards[currentIndex]
         isRefreshingCurrentCard = true
         generationStatus = "Refreshing this phrase with AI."
 
         generationTask?.cancel()
         generationTask = Task {
-            let result = await PracticeCardFactory.makeCards(
-                for: [phrase],
-                phraseProgress: [:],
-                practiceMode: practiceMode,
-                phraseScope: phraseScope,
-                source: PracticeGenerationSource.ai,
-                configuration: backendConfiguration,
-                practiceHistory: practiceHistory,
-                progress: nil
-            )
+            let result = await refreshedCardResult(for: currentCard)
 
             if Task.isCancelled { return }
 
             await MainActor.run {
-                let replacement = result.cards.first { $0.prompt != currentPrompt } ?? result.cards.first
+                let replacement = preferredRefreshReplacement(from: result.cards, currentCard: currentCard)
                 if let replacement {
                     practiceCards[currentIndex] = replacement
                     generationStatus = result.status
@@ -285,6 +266,89 @@ struct QuizView: View {
                 resetCardState()
                 startPromptRevealIfNeeded()
             }
+        }
+    }
+
+    func refreshedCardResult(for card: PracticeCard) async -> PracticeCardResult {
+        guard backendConfiguration.isValid else {
+            return PracticeCardResult(cards: [], status: "AI backend is not configured.")
+        }
+
+        let key = normalizedPhraseKey(card.phrase)
+        var previousSentences = practiceHistory[key]?.map(\.sentence) ?? []
+        previousSentences.insert(card.completedSentence, at: 0)
+
+        do {
+            let generated = try await BackendAIService.shared.generatePracticeCards(
+                for: card.phrase,
+                mode: practiceMode,
+                previousSentences: Array(previousSentences.prefix(20)),
+                configuration: backendConfiguration
+            )
+
+            let generatedCards: [PracticeCard] = generated.compactMap { generatedCard in
+                switch practiceMode {
+                case .random, .weakest:
+                    guard let prompt = SentenceGenerator.blankedSentence(from: generatedCard.sentence, phrase: card.phrase) else {
+                        return nil
+                    }
+                    return PracticeCard(
+                        phrase: card.phrase,
+                        prompt: prompt,
+                        completedSentence: generatedCard.sentence,
+                        highlightedText: ""
+                    )
+                case .search:
+                    return PracticeCard(
+                        phrase: card.phrase,
+                        prompt: generatedCard.sentence,
+                        completedSentence: generatedCard.sentence,
+                        highlightedText: generatedCard.highlightedText
+                    )
+                }
+            }
+
+            return PracticeCardResult(cards: generatedCards, status: "Phrase refreshed with a new sentence.")
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return PracticeCardResult(cards: [], status: "AI failed: \(message)")
+        }
+    }
+
+    func preferredRefreshReplacement(from cards: [PracticeCard], currentCard: PracticeCard) -> PracticeCard? {
+        let currentPosition = phrasePositionScore(for: currentCard.completedSentence, phrase: currentCard.phrase)
+
+        return cards.first {
+            $0.completedSentence != currentCard.completedSentence &&
+            phrasePositionScore(for: $0.completedSentence, phrase: $0.phrase) != currentPosition
+        }
+        ?? cards.first {
+            $0.completedSentence != currentCard.completedSentence
+        }
+        ?? cards.first
+    }
+
+    func phrasePositionScore(for sentence: String, phrase: String) -> Int {
+        let lowercasedSentence = sentence.lowercased()
+        let lowercasedPhrase = phrase.lowercased()
+
+        guard
+            let range = lowercasedSentence.range(of: lowercasedPhrase),
+            !lowercasedSentence.isEmpty
+        else {
+            return 1
+        }
+
+        let distance = lowercasedSentence.distance(from: lowercasedSentence.startIndex, to: range.lowerBound)
+        let ratio = Double(distance) / Double(lowercasedSentence.count)
+
+        switch ratio {
+        case ..<0.33:
+            return 0
+        case ..<0.66:
+            return 1
+        default:
+            return 2
         }
     }
 
@@ -435,7 +499,7 @@ struct QuizView: View {
 
     func startPromptRevealIfNeeded() {
         promptRevealTask?.cancel()
-        revealedPromptCharacterCount = 0
+        revealedPromptCharacterBudget = 0
 
         guard !practiceCards.isEmpty else { return }
         let promptLength = practiceCards[currentIndex].prompt.count
@@ -445,11 +509,78 @@ struct QuizView: View {
             for nextCount in 1...promptLength {
                 if Task.isCancelled { return }
                 await MainActor.run {
-                    revealedPromptCharacterCount = nextCount
+                    withAnimation(.easeIn(duration: 0.18)) {
+                        revealedPromptCharacterBudget = nextCount
+                    }
                 }
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: .milliseconds(40))
             }
         }
+    }
+
+    func fadingPrompt(for card: PracticeCard) -> AttributedString {
+        var attributed = AttributedString(card.prompt)
+        let visibleCount = visibleCharacterCount(for: card.prompt)
+
+        if visibleCount < card.prompt.count {
+            let hiddenStart = card.prompt.index(card.prompt.startIndex, offsetBy: visibleCount)
+            let hiddenSubstring = String(card.prompt[hiddenStart...])
+            if
+                let nsRange = card.prompt.range(of: hiddenSubstring),
+                let attributedRange = Range(nsRange, in: attributed)
+            {
+                attributed[attributedRange].foregroundColor = .clear
+            }
+        }
+
+        return attributed
+    }
+
+    func visibleCharacterCount(for prompt: String) -> Int {
+        let budget = max(0, min(revealedPromptCharacterBudget, prompt.count))
+        guard budget < prompt.count else { return prompt.count }
+
+        let boundaryIndex = prompt.index(prompt.startIndex, offsetBy: budget)
+        let visiblePrefix = prompt[..<boundaryIndex]
+
+        if let lastWhitespace = visiblePrefix.lastIndex(where: \.isWhitespace) {
+            return prompt.distance(from: prompt.startIndex, to: lastWhitespace)
+        }
+
+        let nextWhitespace = prompt[boundaryIndex...].firstIndex(where: \.isWhitespace) ?? prompt.endIndex
+        return prompt.distance(from: prompt.startIndex, to: nextWhitespace)
+    }
+
+    func formattedSearchPrompt(for card: PracticeCard) -> AttributedString {
+        var attributed = AttributedString(card.prompt)
+        let visibleCount = visibleCharacterCount(for: card.prompt)
+
+        if visibleCount < card.prompt.count {
+            let hiddenStart = card.prompt.index(card.prompt.startIndex, offsetBy: visibleCount)
+            let hiddenSubstring = String(card.prompt[hiddenStart...])
+            if
+                let hiddenRange = card.prompt.range(of: hiddenSubstring),
+                let attributedHiddenRange = Range(hiddenRange, in: attributed)
+            {
+                attributed[attributedHiddenRange].foregroundColor = .clear
+            }
+        }
+
+        let visiblePrompt = String(card.prompt.prefix(visibleCount))
+        let highlightedText = card.highlightedText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard
+            !highlightedText.isEmpty,
+            let regex = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: highlightedText), options: [.caseInsensitive]),
+            let match = regex.firstMatch(in: visiblePrompt, range: NSRange(visiblePrompt.startIndex..., in: visiblePrompt)),
+            let range = Range(match.range, in: visiblePrompt),
+            let attributedRange = Range(range, in: attributed)
+        else {
+            return attributed
+        }
+
+        attributed[attributedRange].font = .body.italic()
+        return attributed
     }
 
     var sessionSummaryView: some View {
@@ -595,29 +726,10 @@ struct QuizView: View {
     @ViewBuilder
     func promptView(for card: PracticeCard) -> some View {
         if practiceMode == .search {
-            Text(formattedSearchPrompt(for: card, visibleCharacterCount: revealedPromptCharacterCount))
+            Text(formattedSearchPrompt(for: card))
         } else {
-            Text(String(card.prompt.prefix(revealedPromptCharacterCount)))
+            Text(fadingPrompt(for: card))
         }
-    }
-
-    func formattedSearchPrompt(for card: PracticeCard, visibleCharacterCount: Int) -> AttributedString {
-        let visiblePrompt = String(card.prompt.prefix(visibleCharacterCount))
-        var attributed = AttributedString(visiblePrompt)
-        let highlightedText = card.highlightedText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard
-            !highlightedText.isEmpty,
-            let regex = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: highlightedText), options: [.caseInsensitive]),
-            let match = regex.firstMatch(in: visiblePrompt, range: NSRange(visiblePrompt.startIndex..., in: visiblePrompt)),
-            let range = Range(match.range, in: visiblePrompt),
-            let attributedRange = Range(range, in: attributed)
-        else {
-            return attributed
-        }
-
-        attributed[attributedRange].font = .body.italic()
-        return attributed
     }
 }
 
@@ -1163,7 +1275,12 @@ enum PracticeCycleManager {
         let candidates = candidatePhrases(for: mode, phraseScope: phraseScope, phrases: phrases, phraseProgress: phraseProgress)
         guard !candidates.isEmpty else { return [] }
 
-        var state = loadState(for: mode, phraseScope: phraseScope, candidates: candidates)
+        var state = loadState(
+            for: mode,
+            phraseScope: phraseScope,
+            candidates: candidates,
+            phraseProgress: phraseProgress
+        )
         var selected: [String] = []
         let targetCount = max(1, count)
         var inspectedCount = 0
@@ -1195,8 +1312,8 @@ enum PracticeCycleManager {
         phrases: [String],
         phraseProgress: [String: PhraseProgress]
     ) -> [String] {
-        switch mode {
-        case .random, .search:
+        switch phraseScope {
+        case .all, .selected, .lessPlayed:
             return phrases
         case .weakest:
             return phrases.filter {
@@ -1206,7 +1323,12 @@ enum PracticeCycleManager {
         }
     }
 
-    private static func loadState(for mode: PracticeMode, phraseScope: PracticePhraseScope, candidates: [String]) -> PracticeCycleState {
+    private static func loadState(
+        for mode: PracticeMode,
+        phraseScope: PracticePhraseScope,
+        candidates: [String],
+        phraseProgress: [String: PhraseProgress]
+    ) -> PracticeCycleState {
         let key = mode.cycleStorageKey(for: phraseScope)
         guard
             let data = UserDefaults.standard.data(forKey: key),
@@ -1217,7 +1339,7 @@ enum PracticeCycleManager {
             state.nextIndex >= 0,
             state.nextIndex <= state.order.count
         else {
-            let newPool = freezePool(for: mode, candidates: candidates)
+            let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
             return PracticeCycleState(pool: newPool, order: newPool.shuffled(), nextIndex: 0)
         }
 
@@ -1231,7 +1353,7 @@ enum PracticeCycleManager {
             }
         case .weakest:
             if !poolSet.subtracting(candidateSet).isEmpty {
-                let newPool = freezePool(for: mode, candidates: candidates)
+                let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
                 return PracticeCycleState(pool: newPool, order: newPool.shuffled(), nextIndex: 0)
             }
         }
@@ -1244,9 +1366,18 @@ enum PracticeCycleManager {
         UserDefaults.standard.set(data, forKey: mode.cycleStorageKey(for: phraseScope))
     }
 
-    private static func freezePool(for mode: PracticeMode, candidates: [String]) -> [String] {
-        switch mode {
-        case .random, .search, .weakest:
+    private static func freezePool(for mode: PracticeMode, candidates: [String], phraseProgress: [String: PhraseProgress] = [:], phraseScope: PracticePhraseScope = .all) -> [String] {
+        switch phraseScope {
+        case .lessPlayed:
+            return candidates.sorted { lhs, rhs in
+                let leftProgress = phraseProgress[lhs.normalizedProgressKey] ?? PhraseProgress()
+                let rightProgress = phraseProgress[rhs.normalizedProgressKey] ?? PhraseProgress()
+                if leftProgress.totalAttempts == rightProgress.totalAttempts {
+                    return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+                }
+                return leftProgress.totalAttempts < rightProgress.totalAttempts
+            }
+        case .all, .selected, .weakest:
             return candidates
         }
     }

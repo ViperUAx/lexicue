@@ -6,6 +6,8 @@ struct ContentView: View {
     @State private var phraseMeanings: [String: String] = [:]
     @State private var practiceHistory: [String: [PracticeLogEntry]] = [:]
     @State private var showAISettings = false
+    @State private var isBootstrapping = true
+    @State private var bootstrapStatus = "Loading saved phrases."
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     private let appFont = Font.custom("Helvetica Neue", size: 17)
 
@@ -17,23 +19,18 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            dashboardView
+            mainContentView
             .environment(\.font, appFont)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("AI") {
-                        showAISettings = true
-                    }
+                    aiToolbarButton
                 }
             }
             .sheet(isPresented: $showAISettings) {
                 AISettingsView(endpointURL: $backendBaseURL)
             }
-            .onAppear {
-                loadPhrases()
-                loadPhraseProgress()
-                loadPhraseMeanings()
-                loadPracticeHistory()
+            .task {
+                await bootstrapIfNeeded()
             }
             .onChange(of: savedPhrases) { _, newValue in
                 savePhrases(newValue)
@@ -51,6 +48,42 @@ struct ContentView: View {
                 savePracticeHistory(newValue)
             }
         }
+    }
+
+    @ViewBuilder
+    var mainContentView: some View {
+        if isBootstrapping {
+            startupLoadingView
+        } else {
+            dashboardView
+        }
+    }
+
+    @ViewBuilder
+    var aiToolbarButton: some View {
+        if !isBootstrapping {
+            Button("AI") {
+                showAISettings = true
+            }
+        }
+    }
+
+    var startupLoadingView: some View {
+        VStack(spacing: 18) {
+            ProgressView()
+                .controlSize(.large)
+
+            Text("Opening LexiCue")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            Text(bootstrapStatus)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
     }
 
     var dashboardView: some View {
@@ -139,6 +172,29 @@ struct ContentView: View {
         phraseProgress.values.reduce(0) { $0 + $1.correctCount + $1.wrongCount }
     }
 
+    @MainActor
+    func bootstrapIfNeeded() async {
+        guard isBootstrapping else { return }
+
+        bootstrapStatus = "Loading saved phrases."
+        let phrases = await loadSavedPhrases()
+
+        bootstrapStatus = "Loading progress."
+        let progress = await loadStoredPhraseProgress()
+
+        bootstrapStatus = "Loading meanings."
+        let meanings = await loadStoredPhraseMeanings()
+
+        bootstrapStatus = "Loading practice history."
+        let history = await loadStoredPracticeHistory()
+
+        savedPhrases = phrases
+        phraseProgress = progress
+        phraseMeanings = meanings
+        practiceHistory = history
+        isBootstrapping = false
+    }
+
     func savePhrases(_ phrases: [String]) {
         UserDefaults.standard.set(phrases, forKey: "savedPhrases")
     }
@@ -190,6 +246,54 @@ struct ContentView: View {
         }
 
         practiceHistory = history
+    }
+
+    func loadSavedPhrases() async -> [String] {
+        await Task.detached(priority: .userInitiated) {
+            if let saved = UserDefaults.standard.stringArray(forKey: "savedPhrases") {
+                return saved
+            }
+            return defaultPhrases
+        }.value
+    }
+
+    func loadStoredPhraseProgress() async -> [String: PhraseProgress] {
+        await Task.detached(priority: .userInitiated) {
+            guard
+                let data = UserDefaults.standard.data(forKey: "phraseProgress"),
+                let progress = try? JSONDecoder().decode([String: PhraseProgress].self, from: data)
+            else {
+                return [:]
+            }
+
+            return progress
+        }.value
+    }
+
+    func loadStoredPhraseMeanings() async -> [String: String] {
+        await Task.detached(priority: .userInitiated) {
+            guard
+                let data = UserDefaults.standard.data(forKey: "phraseMeanings"),
+                let meanings = try? JSONDecoder().decode([String: String].self, from: data)
+            else {
+                return [:]
+            }
+
+            return meanings
+        }.value
+    }
+
+    func loadStoredPracticeHistory() async -> [String: [PracticeLogEntry]] {
+        await Task.detached(priority: .userInitiated) {
+            guard
+                let data = UserDefaults.standard.data(forKey: "practiceHistory"),
+                let history = try? JSONDecoder().decode([String: [PracticeLogEntry]].self, from: data)
+            else {
+                return [:]
+            }
+
+            return history
+        }.value
     }
 
     func savePhraseMeanings(_ meanings: [String: String]) {
@@ -351,13 +455,6 @@ struct PracticeModesView: View {
                 )
 
                 modeLink(
-                    title: "Weakest Phrases Mode",
-                    subtitle: "10 random phrases between 1% and 50% success",
-                    practiceMode: .weakest,
-                    tint: .orange
-                )
-
-                modeLink(
                     title: "Search Mode",
                     subtitle: "Guess the original phrase from an italic synonym",
                     practiceMode: .search,
@@ -373,33 +470,17 @@ struct PracticeModesView: View {
 
     @ViewBuilder
     func modeLink(title: String, subtitle: String, practiceMode: PracticeMode, tint: Color) -> some View {
-        if practiceMode == .weakest {
-            NavigationLink {
-                QuizView(
-                    savedPhrases: savedPhrases,
-                    phraseProgress: $phraseProgress,
-                    practiceHistory: $practiceHistory,
-                    practiceMode: practiceMode,
-                    phraseScope: .all,
-                    selectedPhraseKeys: []
-                )
-            } label: {
-                modeRow(title: title, subtitle: subtitle, tint: tint)
-            }
-            .disabled(isDisabled(practiceMode))
-        } else {
-            NavigationLink {
-                PracticeScopePickerView(
-                    savedPhrases: savedPhrases,
-                    phraseProgress: $phraseProgress,
-                    practiceHistory: $practiceHistory,
-                    practiceMode: practiceMode
-                )
-            } label: {
-                modeRow(title: title, subtitle: subtitle, tint: tint)
-            }
-            .disabled(isDisabled(practiceMode))
+        NavigationLink {
+            PracticeScopePickerView(
+                savedPhrases: savedPhrases,
+                phraseProgress: $phraseProgress,
+                practiceHistory: $practiceHistory,
+                practiceMode: practiceMode
+            )
+        } label: {
+            modeRow(title: title, subtitle: subtitle, tint: tint)
         }
+        .disabled(isDisabled(practiceMode))
     }
 
     func modeRow(title: String, subtitle: String, tint: Color) -> some View {
@@ -429,7 +510,7 @@ struct PracticeModesView: View {
         case .random, .search:
             return savedPhrases.isEmpty
         case .weakest:
-            return weakestCandidates.isEmpty
+            return true
         }
     }
 
@@ -444,6 +525,8 @@ struct PracticeModesView: View {
 enum PracticePhraseScope: String, Hashable, Codable {
     case all
     case selected
+    case lessPlayed
+    case weakest
 
     var title: String {
         switch self {
@@ -451,6 +534,10 @@ enum PracticePhraseScope: String, Hashable, Codable {
             return "All Phrases"
         case .selected:
             return "Selected Phrases"
+        case .lessPlayed:
+            return "Less Played"
+        case .weakest:
+            return "Weakest"
         }
     }
 
@@ -499,12 +586,55 @@ struct PracticeScopePickerView: View {
                         tint: practiceMode == .random ? .blue : .purple
                     )
                 }
+
+                NavigationLink {
+                    QuizView(
+                        savedPhrases: savedPhrases,
+                        phraseProgress: $phraseProgress,
+                        practiceHistory: $practiceHistory,
+                        practiceMode: practiceMode,
+                        phraseScope: .lessPlayed,
+                        selectedPhraseKeys: []
+                    )
+                } label: {
+                    scopeRow(
+                        title: "Less Played",
+                        subtitle: "Prioritize phrases with fewer total attempts.",
+                        tint: practiceMode == .random ? .blue : .purple
+                    )
+                }
+                .disabled(savedPhrases.isEmpty)
+
+                NavigationLink {
+                    QuizView(
+                        savedPhrases: savedPhrases,
+                        phraseProgress: $phraseProgress,
+                        practiceHistory: $practiceHistory,
+                        practiceMode: practiceMode,
+                        phraseScope: .weakest,
+                        selectedPhraseKeys: []
+                    )
+                } label: {
+                    scopeRow(
+                        title: "Weakest Phrases",
+                        subtitle: "Use phrases with a success rate between 1% and 50%.",
+                        tint: practiceMode == .random ? .blue : .purple
+                    )
+                }
+                .disabled(weakestCandidates.isEmpty)
             }
             .padding()
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle(practiceMode.navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    var weakestCandidates: [String] {
+        savedPhrases.filter {
+            let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
+            return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
+        }
     }
 
     func scopeRow(title: String, subtitle: String, tint: Color) -> some View {

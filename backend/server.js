@@ -39,8 +39,8 @@ const sentenceResponseSchema = {
         properties: {
             cards: {
                 type: "array",
-                minItems: 4,
-                maxItems: 4,
+                minItems: 2,
+                maxItems: 2,
                 items: {
                     type: "object",
                     additionalProperties: false,
@@ -408,7 +408,7 @@ function logServerError(scope, error) {
 function buildSentenceSystemPrompt(mode) {
     const sharedRules = [
         "You create natural English vocabulary practice cards.",
-        "Return exactly four cards.",
+        "Return exactly two cards.",
         "Every sentence must be between 20 and 30 words.",
         "Each card must use a different situation, structure, and wording from the others.",
         "Avoid repeating openings, grammar frames, or near-duplicate sentence patterns.",
@@ -452,10 +452,10 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
 
     if (mode === "search") {
         return [
-            `Generate four search-mode cards for this saved phrase: ${phrase}.`,
+            `Generate two search-mode cards for this saved phrase: ${phrase}.`,
             "The learner should infer the original saved phrase from a synonym or near-synonymous wording used in the sentence.",
             "The original phrase must be able to replace the highlighted wording directly and still sound grammatical and natural.",
-            "Make all four cards clearly different in setting, logic, and sentence structure.",
+            "Make both cards clearly different in setting, logic, and sentence structure.",
             "Return each card as { sentence, highlightedText }.",
             "highlightedText must be the exact synonym substring present in sentence.",
             previousBlock
@@ -463,8 +463,8 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
     }
 
     return [
-        `Generate four fill-in-the-blank cards for this exact saved phrase: ${phrase}.`,
-        "Make all four cards clearly different in setting, logic, and sentence structure.",
+        `Generate two fill-in-the-blank cards for this exact saved phrase: ${phrase}.`,
+        "Make both cards clearly different in setting, logic, and sentence structure.",
         "Return each card as { sentence, highlightedText }.",
         "highlightedText must be an empty string for every card.",
         previousBlock
