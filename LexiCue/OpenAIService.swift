@@ -41,7 +41,7 @@ final class BackendAIService {
             requestBody: PracticeGenerationRequest(
                 phrase: phrase,
                 mode: mode.backendMode,
-                previousSentences: Array(previousSentences.prefix(20))
+                previousSentences: Array(previousSentences.prefix(1))
             )
         )
 
@@ -88,6 +88,26 @@ final class BackendAIService {
         return response.meaning
     }
 
+    func extractPhotoPhrases(
+        imageData: Data,
+        rule: String,
+        configuration: BackendConfiguration
+    ) async throws -> [String] {
+        guard configuration.isValid else { throw BackendAIServiceError.missingConfiguration }
+
+        let payload = try await performRequest(
+            path: "extract-photo-phrases",
+            configuration: configuration,
+            requestBody: PhotoPhraseExtractionRequest(
+                imageBase64: imageData.base64EncodedString(),
+                rule: rule
+            )
+        )
+
+        let response = try JSONDecoder().decode(PhotoPhraseExtractionBundle.self, from: payload)
+        return response.phrases
+    }
+
     private func performRequest<RequestBody: Encodable>(
         path: String,
         configuration: BackendConfiguration,
@@ -129,6 +149,11 @@ private struct PracticeGenerationRequest: Encodable {
     let previousSentences: [String]
 }
 
+private struct PhotoPhraseExtractionRequest: Encodable {
+    let imageBase64: String
+    let rule: String
+}
+
 struct GeneratedSentenceCard: Decodable {
     let sentence: String
     let highlightedText: String
@@ -148,6 +173,10 @@ private struct HintBundle: Decodable {
 
 private struct MeaningBundle: Decodable {
     let meaning: String
+}
+
+private struct PhotoPhraseExtractionBundle: Decodable {
+    let phrases: [String]
 }
 
 extension BackendAIServiceError: LocalizedError {

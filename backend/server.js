@@ -31,6 +31,11 @@ const generationRequestSchema = z.object({
     previousSentences: z.array(z.string().trim().min(1).max(280)).max(20).default([])
 });
 
+const photoPhraseExtractionRequestSchema = z.object({
+    imageBase64: z.string().trim().min(100),
+    rule: z.string().trim().min(3).max(1000)
+});
+
 const sentenceResponseSchema = {
     name: "generated_card_bundle",
     schema: {
@@ -108,9 +113,28 @@ const meaningResponseSchema = {
     strict: true
 };
 
+const photoPhraseResponseSchema = {
+    name: "recognized_photo_phrases",
+    schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+            phrases: {
+                type: "array",
+                maxItems: 30,
+                items: {
+                    type: "string"
+                }
+            }
+        },
+        required: ["phrases"]
+    },
+    strict: true
+};
+
 app.set("trust proxy", 1);
 app.use(helmet());
-app.use(express.json({ limit: "16kb" }));
+app.use(express.json({ limit: "4mb" }));
 app.use(
     cors({
         origin(origin, callback) {
@@ -375,6 +399,74 @@ app.post("/define-phrase", async (request, response) => {
     }
 });
 
+app.post("/extract-photo-phrases", async (request, response) => {
+    const parsed = photoPhraseExtractionRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+        response.status(400).json({
+            error: "Invalid request body."
+        });
+        return;
+    }
+
+    try {
+        const imageURL = buildImageDataURL(parsed.data.imageBase64);
+        const result = await openai.responses.create({
+            model: openAIModel,
+            input: [
+                {
+                    role: "system",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: [
+                                "You extract English study phrases from a photo using the user's recognition rule.",
+                                "Follow the user's rule strictly.",
+                                "Only return phrase candidates the learner is likely intending to save.",
+                                "Ignore dates, weekdays, page furniture, paragraph prose, numbering, and non-phrase text unless the rule clearly asks for them.",
+                                "Prefer short words or multiword expressions suitable for vocabulary study.",
+                                "Return unique phrases only, preserving the original spelling as seen when possible."
+                            ].join(" ")
+                        }
+                    ]
+                },
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "input_text",
+                            text: [
+                                `Recognition rule: ${parsed.data.rule}`,
+                                "Look at the image and return the English phrases or words that match this rule.",
+                                "If the image does not clearly match the rule, return an empty list."
+                            ].join(" ")
+                        },
+                        {
+                            type: "input_image",
+                            image_url: imageURL
+                        }
+                    ]
+                }
+            ],
+            text: {
+                format: {
+                    type: "json_schema",
+                    ...photoPhraseResponseSchema
+                }
+            }
+        });
+
+        const payload = extractJSONObject(result.output_text);
+        const parsedPayload = JSON.parse(payload);
+        parsedPayload.phrases = normalizeRecognizedPhrases(parsedPayload.phrases);
+        response.json(parsedPayload);
+    } catch (error) {
+        logServerError("extract-photo-phrases", error);
+        response.status(503).json({
+            error: "Photo phrase recognition is temporarily unavailable."
+        });
+    }
+});
+
 app.use((error, _request, response, _next) => {
     if (error?.message === "Origin not allowed by CORS") {
         response.status(403).json({
@@ -403,6 +495,40 @@ function extractJSONObject(outputText) {
 
 function logServerError(scope, error) {
     console.error(`[${scope}]`, error);
+}
+
+function buildImageDataURL(imageBase64) {
+    return `data:image/jpeg;base64,${imageBase64}`;
+}
+
+function normalizeRecognizedPhrases(phrases) {
+    if (!Array.isArray(phrases)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const cleaned = [];
+
+    for (const phrase of phrases) {
+        if (typeof phrase !== "string") {
+            continue;
+        }
+
+        const trimmed = phrase.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        const normalized = trimmed.toLowerCase();
+        if (seen.has(normalized)) {
+            continue;
+        }
+
+        seen.add(normalized);
+        cleaned.push(trimmed);
+    }
+
+    return cleaned;
 }
 
 function buildSentenceSystemPrompt(mode) {

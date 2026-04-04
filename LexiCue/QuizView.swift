@@ -22,6 +22,7 @@ struct QuizView: View {
     @State private var isLoadingMeaningHint = false
     @State private var recordedWrongAttempt = false
     @State private var completionLogged = false
+    @State private var revealedCorrectAnswer = false
     @State private var sessionCorrectCount = 0
     @State private var sessionWrongCount = 0
     @State private var showSessionSummary = false
@@ -29,6 +30,7 @@ struct QuizView: View {
     @State private var isRefreshingCurrentCard = false
     @State private var revealedPromptCharacterBudget = 0
     @State private var promptRevealTask: Task<Void, Never>?
+    @State private var autoAdvanceTask: Task<Void, Never>?
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     @FocusState private var answerFieldFocused: Bool
     private let appFont = Font.custom("Helvetica Neue", size: 17)
@@ -81,7 +83,19 @@ struct QuizView: View {
                         if hasCheckedAnswer {
                             Text(resultMessage)
                                 .font(.headline)
-                                .foregroundStyle(isAnswerCorrect(for: currentCard) ? .green : .red)
+                                .foregroundStyle(revealedCorrectAnswer || isAnswerCorrect(for: currentCard) ? .green : .red)
+                        }
+
+                        if revealedCorrectAnswer {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Correct answer")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Text(currentCard.phrase)
+                                    .font(.headline)
+                                    .fontWeight(.semibold)
+                            }
                         }
 
                         if isLoadingMeaningHint {
@@ -114,7 +128,7 @@ struct QuizView: View {
                             checkAnswer(for: currentCard)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(userAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(userAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || revealedCorrectAnswer)
                     }
 
                     HStack(spacing: 12) {
@@ -127,9 +141,9 @@ struct QuizView: View {
                         }
                         .buttonStyle(.bordered)
 
-                        if hasCheckedAnswer && !isAnswerCorrect(for: currentCard) {
-                            Button("Next Card") {
-                                showNextCard()
+                        if recordedWrongAttempt && !revealedCorrectAnswer {
+                            Button("Check Correct Answer") {
+                                revealCorrectAnswer(for: currentCard)
                             }
                             .buttonStyle(.bordered)
                         }
@@ -155,6 +169,7 @@ struct QuizView: View {
         .onDisappear {
             generationTask?.cancel()
             promptRevealTask?.cancel()
+            autoAdvanceTask?.cancel()
         }
     }
 
@@ -282,7 +297,7 @@ struct QuizView: View {
             let generated = try await BackendAIService.shared.generatePracticeCards(
                 for: card.phrase,
                 mode: practiceMode,
-                previousSentences: Array(previousSentences.prefix(20)),
+                previousSentences: Array(previousSentences.prefix(1)),
                 configuration: backendConfiguration
             )
 
@@ -427,16 +442,10 @@ struct QuizView: View {
 
             completeCardIfNeeded(card, wasCorrect: true)
 
-            Task {
-                try? await Task.sleep(for: .milliseconds(700))
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    showNextCard()
-                }
-            }
+            scheduleAutoAdvance()
         } else {
             answerFieldFocused = true
-            resultMessage = "Not quite. Try again, or use the hint."
+            resultMessage = "Not quite. Use the hint or check the correct answer."
 
             if !recordedWrongAttempt {
                 recordedWrongAttempt = true
@@ -449,11 +458,20 @@ struct QuizView: View {
         }
     }
 
+    func revealCorrectAnswer(for card: PracticeCard) {
+        guard !revealedCorrectAnswer else { return }
+        revealedCorrectAnswer = true
+        answerFieldFocused = false
+        resultMessage = "Correct answer revealed."
+        scheduleAutoAdvance()
+    }
+
     func isAnswerCorrect(for card: PracticeCard) -> Bool {
         normalized(userAnswer) == normalized(card.phrase)
     }
 
     func resetCardState() {
+        autoAdvanceTask?.cancel()
         userAnswer = ""
         resultMessage = ""
         hasCheckedAnswer = false
@@ -461,13 +479,26 @@ struct QuizView: View {
         isLoadingMeaningHint = false
         recordedWrongAttempt = false
         completionLogged = false
+        revealedCorrectAnswer = false
         answerFieldFocused = !practiceCards.isEmpty
+    }
+
+    func scheduleAutoAdvance() {
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                showNextCard()
+            }
+        }
     }
 
     func completeCardIfNeeded(_ card: PracticeCard, wasCorrect: Bool) {
         guard !completionLogged else { return }
 
         completionLogged = true
+        applyMasteryPoints(for: card, wasCorrect: wasCorrect)
         if wasCorrect {
             sessionCorrectCount += 1
         } else {
@@ -499,14 +530,15 @@ struct QuizView: View {
 
     func startPromptRevealIfNeeded() {
         promptRevealTask?.cancel()
-        revealedPromptCharacterBudget = 0
+        revealedPromptCharacterBudget = initialRevealBudgetForCurrentCard()
 
         guard !practiceCards.isEmpty else { return }
         let promptLength = practiceCards[currentIndex].prompt.count
         guard promptLength > 0 else { return }
 
         promptRevealTask = Task {
-            for nextCount in 1...promptLength {
+            let startCount = max(1, min(revealedPromptCharacterBudget, promptLength))
+            for nextCount in startCount...promptLength {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     withAnimation(.easeIn(duration: 0.18)) {
@@ -516,6 +548,20 @@ struct QuizView: View {
                 try? await Task.sleep(for: .milliseconds(40))
             }
         }
+    }
+
+    func initialRevealBudgetForCurrentCard() -> Int {
+        guard !practiceCards.isEmpty else { return 0 }
+        let prompt = practiceCards[currentIndex].prompt
+        let initialTarget = min(18, prompt.count)
+        let boundaryIndex = prompt.index(prompt.startIndex, offsetBy: initialTarget)
+        let prefix = prompt[..<boundaryIndex]
+
+        if let lastWhitespace = prefix.lastIndex(where: \.isWhitespace) {
+            return max(1, prompt.distance(from: prompt.startIndex, to: lastWhitespace))
+        }
+
+        return initialTarget
     }
 
     func fadingPrompt(for card: PracticeCard) -> AttributedString {
@@ -641,6 +687,57 @@ struct QuizView: View {
             at: 0
         )
         practiceHistory[key] = Array(entries.prefix(20))
+    }
+
+    func applyMasteryPoints(for card: PracticeCard, wasCorrect: Bool) {
+        let key = card.phrase.normalizedProgressKey
+        var progress = phraseProgress[key] ?? PhraseProgress()
+        progress.applyMasteryDelta(masteryDelta(wasCorrect: wasCorrect))
+        phraseProgress[key] = progress
+    }
+
+    func masteryDelta(wasCorrect: Bool) -> Int {
+        guard wasCorrect else { return -1 }
+
+        let usedHint = meaningHint != nil
+        switch (practiceMode, phraseScope, usedHint) {
+        case (.random, .all, false):
+            return 5
+        case (.random, .all, true):
+            return 4
+        case (.random, .selected, false):
+            return 2
+        case (.random, .selected, true):
+            return 1
+        case (.random, .lessPlayed, false):
+            return 3
+        case (.random, .lessPlayed, true):
+            return 2
+        case (.random, .weakest, false):
+            return 4
+        case (.random, .weakest, true):
+            return 3
+        case (.search, .all, false):
+            return 4
+        case (.search, .all, true):
+            return 3
+        case (.search, .selected, false):
+            return 2
+        case (.search, .selected, true):
+            return 1
+        case (.search, .lessPlayed, false):
+            return 3
+        case (.search, .lessPlayed, true):
+            return 2
+        case (.search, .weakest, false):
+            return 3
+        case (.search, .weakest, true):
+            return 2
+        case (.weakest, _, false):
+            return 4
+        case (.weakest, _, true):
+            return 3
+        }
     }
 
     func normalized(_ text: String) -> String {
@@ -967,7 +1064,7 @@ enum PracticeCardFactory {
         }
 
         let targetPhraseCount = min(
-            10,
+            5,
             PracticeCycleManager.candidatePhrases(
                 for: practiceMode,
                 phraseScope: phraseScope,
@@ -1287,7 +1384,7 @@ enum PracticeCycleManager {
 
         while selected.count < targetCount, inspectedCount < max(state.order.count * 2, 1) {
             if state.order.isEmpty || state.nextIndex >= state.order.count {
-                state.order = state.pool.shuffled()
+                state.order = orderedPool(for: phraseScope, pool: state.pool)
                 state.nextIndex = 0
             }
 
@@ -1316,10 +1413,7 @@ enum PracticeCycleManager {
         case .all, .selected, .lessPlayed:
             return phrases
         case .weakest:
-            return phrases.filter {
-                let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
-                return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
-            }
+            return weakestPhraseCandidates(from: phrases, phraseProgress: phraseProgress)
         }
     }
 
@@ -1340,7 +1434,7 @@ enum PracticeCycleManager {
             state.nextIndex <= state.order.count
         else {
             let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
-            return PracticeCycleState(pool: newPool, order: newPool.shuffled(), nextIndex: 0)
+            return PracticeCycleState(pool: newPool, order: orderedPool(for: phraseScope, pool: newPool), nextIndex: 0)
         }
 
         let candidateSet = Set(candidates)
@@ -1354,7 +1448,7 @@ enum PracticeCycleManager {
         case .weakest:
             if !poolSet.subtracting(candidateSet).isEmpty {
                 let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
-                return PracticeCycleState(pool: newPool, order: newPool.shuffled(), nextIndex: 0)
+                return PracticeCycleState(pool: newPool, order: orderedPool(for: phraseScope, pool: newPool), nextIndex: 0)
             }
         }
 
@@ -1379,6 +1473,15 @@ enum PracticeCycleManager {
             }
         case .all, .selected, .weakest:
             return candidates
+        }
+    }
+
+    private static func orderedPool(for phraseScope: PracticePhraseScope, pool: [String]) -> [String] {
+        switch phraseScope {
+        case .all, .selected:
+            return pool.shuffled()
+        case .lessPlayed, .weakest:
+            return pool
         }
     }
 }

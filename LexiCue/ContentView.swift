@@ -33,10 +33,16 @@ struct ContentView: View {
                 await bootstrapIfNeeded()
             }
             .onChange(of: savedPhrases) { _, newValue in
-                savePhrases(newValue)
-                removeProgressForDeletedPhrases(using: newValue)
-                removeMeaningForDeletedPhrases(using: newValue)
-                removePracticeHistoryForDeletedPhrases(using: newValue)
+                let deduplicated = deduplicatedPhrases(newValue)
+                if deduplicated != newValue {
+                    savedPhrases = deduplicated
+                    return
+                }
+
+                savePhrases(deduplicated)
+                removeProgressForDeletedPhrases(using: deduplicated)
+                removeMeaningForDeletedPhrases(using: deduplicated)
+                removePracticeHistoryForDeletedPhrases(using: deduplicated)
             }
             .onChange(of: phraseProgress) { _, newValue in
                 savePhraseProgress(newValue)
@@ -201,7 +207,7 @@ struct ContentView: View {
 
     func loadPhrases() {
         if let saved = UserDefaults.standard.stringArray(forKey: "savedPhrases") {
-            savedPhrases = saved
+            savedPhrases = deduplicatedPhrases(saved)
         } else {
             savedPhrases = defaultPhrases
         }
@@ -251,10 +257,26 @@ struct ContentView: View {
     func loadSavedPhrases() async -> [String] {
         await Task.detached(priority: .userInitiated) {
             if let saved = UserDefaults.standard.stringArray(forKey: "savedPhrases") {
-                return saved
+                return deduplicatedPhrases(saved)
             }
             return defaultPhrases
         }.value
+    }
+
+    nonisolated func deduplicatedPhrases(_ phrases: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for phrase in phrases {
+            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.normalizedProgressKey
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+
+        return result
     }
 
     func loadStoredPhraseProgress() async -> [String: PhraseProgress] {
@@ -366,22 +388,135 @@ struct ContentView: View {
 struct PhraseProgress: Codable, Hashable {
     var correctCount = 0
     var wrongCount = 0
+    var masteryPoints = 0
+    var highestMasteryLevelRaw = MasteryLevel.one.rawValue
 
-    var totalAttempts: Int {
+    nonisolated init(
+        correctCount: Int = 0,
+        wrongCount: Int = 0,
+        masteryPoints: Int = 0,
+        highestMasteryLevelRaw: Int = MasteryLevel.one.rawValue
+    ) {
+        self.correctCount = correctCount
+        self.wrongCount = wrongCount
+        self.masteryPoints = masteryPoints
+        self.highestMasteryLevelRaw = highestMasteryLevelRaw
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        correctCount = try container.decodeIfPresent(Int.self, forKey: .correctCount) ?? 0
+        wrongCount = try container.decodeIfPresent(Int.self, forKey: .wrongCount) ?? 0
+        masteryPoints = try container.decodeIfPresent(Int.self, forKey: .masteryPoints) ?? 0
+        highestMasteryLevelRaw = try container.decodeIfPresent(Int.self, forKey: .highestMasteryLevelRaw) ?? MasteryLevel(points: masteryPoints).rawValue
+    }
+
+    nonisolated var totalAttempts: Int {
         correctCount + wrongCount
     }
 
-    var successRate: Double {
+    nonisolated var successRate: Double {
         guard totalAttempts > 0 else { return 0 }
         return Double(correctCount) / Double(totalAttempts)
     }
 
-    var reviewPriority: Int {
+    nonisolated var reviewPriority: Int {
         wrongCount - correctCount
     }
 
-    var needsReview: Bool {
+    nonisolated var needsReview: Bool {
         reviewPriority > 0
+    }
+
+    nonisolated var masteryLevel: MasteryLevel {
+        MasteryLevel(points: masteryPoints)
+    }
+
+    nonisolated var highestMasteryLevel: MasteryLevel {
+        MasteryLevel(rawValue: highestMasteryLevelRaw) ?? .one
+    }
+
+    nonisolated var masteryFloor: Int {
+        highestMasteryLevel.minimumPoints ?? 0
+    }
+
+    mutating func applyMasteryDelta(_ delta: Int) {
+        let updatedPoints = max(masteryFloor, masteryPoints + delta)
+        masteryPoints = max(0, updatedPoints)
+        highestMasteryLevelRaw = max(highestMasteryLevelRaw, MasteryLevel(points: masteryPoints).rawValue)
+    }
+}
+
+enum MasteryLevel: Int, CaseIterable, Codable {
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+    case five = 5
+
+    nonisolated init(points: Int) {
+        switch points {
+        case ..<50:
+            self = .one
+        case ..<125:
+            self = .two
+        case ..<250:
+            self = .three
+        case ..<400:
+            self = .four
+        default:
+            self = .five
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .one: return "Grade I"
+        case .two: return "Grade II"
+        case .three: return "Grade III"
+        case .four: return "Grade IV"
+        case .five: return "Grade V"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .one: return "I"
+        case .two: return "II"
+        case .three: return "III"
+        case .four: return "IV"
+        case .five: return "V"
+        }
+    }
+
+    var pointsRange: ClosedRange<Int>? {
+        switch self {
+        case .one: return 0...49
+        case .two: return 50...124
+        case .three: return 125...249
+        case .four: return 250...399
+        case .five: return 400...700
+        }
+    }
+
+    var nextLevel: MasteryLevel? {
+        switch self {
+        case .one: return .two
+        case .two: return .three
+        case .three: return .four
+        case .four: return .five
+        case .five: return nil
+        }
+    }
+
+    nonisolated var minimumPoints: Int? {
+        switch self {
+        case .one: return 0
+        case .two: return 50
+        case .three: return 125
+        case .four: return 250
+        case .five: return 400
+        }
     }
 }
 
@@ -449,7 +584,7 @@ struct PracticeModesView: View {
             VStack(alignment: .leading, spacing: 12) {
                 modeLink(
                     title: "Random Mode",
-                    subtitle: "10 random phrases, 2 cards each",
+                    subtitle: "5 phrases, 2 cards each",
                     practiceMode: .random,
                     tint: .blue
                 )
@@ -515,10 +650,7 @@ struct PracticeModesView: View {
     }
 
     var weakestCandidates: [String] {
-        savedPhrases.filter {
-            let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
-            return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
-        }
+        weakestPhraseCandidates(from: savedPhrases, phraseProgress: phraseProgress)
     }
 }
 
@@ -617,7 +749,7 @@ struct PracticeScopePickerView: View {
                 } label: {
                     scopeRow(
                         title: "Weakest Phrases",
-                        subtitle: "Use phrases with a success rate between 1% and 50%.",
+                        subtitle: "Use the 5 weakest phrases, with never-played phrases first.",
                         tint: practiceMode == .random ? .blue : .purple
                     )
                 }
@@ -631,10 +763,7 @@ struct PracticeScopePickerView: View {
     }
 
     var weakestCandidates: [String] {
-        savedPhrases.filter {
-            let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
-            return progress.totalAttempts > 0 && progress.successRate > 0 && progress.successRate <= 0.5
-        }
+        weakestPhraseCandidates(from: savedPhrases, phraseProgress: phraseProgress)
     }
 
     func scopeRow(title: String, subtitle: String, tint: Color) -> some View {
@@ -751,7 +880,7 @@ struct PracticePhraseSelectionView: View {
 }
 
 extension String {
-    var normalizedProgressKey: String {
+    nonisolated var normalizedProgressKey: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .replacingOccurrences(of: "’", with: "'")
@@ -760,4 +889,27 @@ extension String {
 
 #Preview {
     ContentView()
+}
+
+nonisolated func weakestPhraseCandidates(from phrases: [String], phraseProgress: [String: PhraseProgress]) -> [String] {
+    phrases.sorted { lhs, rhs in
+        let left = phraseProgress[lhs.normalizedProgressKey] ?? PhraseProgress()
+        let right = phraseProgress[rhs.normalizedProgressKey] ?? PhraseProgress()
+
+        let leftNeverPlayed = left.totalAttempts == 0
+        let rightNeverPlayed = right.totalAttempts == 0
+        if leftNeverPlayed != rightNeverPlayed {
+            return leftNeverPlayed
+        }
+
+        if left.successRate != right.successRate {
+            return left.successRate < right.successRate
+        }
+
+        if left.totalAttempts != right.totalAttempts {
+            return left.totalAttempts < right.totalAttempts
+        }
+
+        return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+    }
 }
