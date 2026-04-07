@@ -566,6 +566,13 @@ function buildSentenceSystemPrompt(mode) {
         "The learner must be able to answer with the exact saved phrase unchanged.",
         "Do not require any tense change, aspect change, plural change, article change, word order change, or other grammatical transformation.",
         "If the phrase is a base-form verb or verb phrase, write the sentence so that the exact phrase fits naturally as written.",
+        "Never force a base-form verb or verb phrase into a sentence that really requires a past-tense, third-person-singular, pluralized, or otherwise inflected form.",
+        "Bad example: saved phrase 'come across' in 'Last Saturday, I come across an old postcard.'",
+        "Good example: saved phrase 'come across' in 'While sorting old boxes, I sometimes come across postcards from my childhood.'",
+        "Bad example: saved phrase 'gain sight of' in 'We finally gain sight of the lighthouse yesterday.'",
+        "Good example: saved phrase 'gain sight of' in 'From this hill, we often gain sight of the lighthouse before sunset.'",
+        "If the sentence contains a time marker like yesterday, last week, last Saturday, two years ago, or another context that changes the verb form, do not use that sentence idea unless the exact saved phrase still fits unchanged.",
+        "Before returning each card, verify that the exact saved phrase can be inserted as-is and the full sentence remains grammatical and natural.",
         "If inserting the exact saved phrase would be ungrammatical, reject that sentence idea and write a different one.",
         "Return highlightedText as an empty string."
     ].join(" ");
@@ -591,6 +598,8 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
     return [
         `Generate two fill-in-the-blank cards for this exact saved phrase: ${phrase}.`,
         "Make both cards clearly different in setting, logic, and sentence structure.",
+        "Use sentence frames where the exact saved phrase fits without any grammatical changes.",
+        "Do not write a sentence that would really need a different inflected form of the phrase.",
         "Return each card as { sentence, highlightedText }.",
         "highlightedText must be an empty string for every card.",
         previousBlock

@@ -15,13 +15,14 @@ struct MyWordsView: View {
     @Binding var phraseMeanings: [String: String]
     @Binding var practiceHistory: [String: [PracticeLogEntry]]
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
+    @AppStorage("photoRecognitionRule") private var savedPhotoRecognitionRule = "Phrases are on the left side and shown one per line."
 
     @State private var pastedPhrases = ""
     @State private var importMessage = ""
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var capturedPhotoData: Data?
     @State private var pendingPhotoData: Data?
-    @State private var photoRecognitionRule = "Phrases are on the left side and shown one per line."
+    @State private var photoRecognitionRule = ""
     @State private var recognizedPhotoPhrases: [String] = []
     @State private var selectedRecognizedPhrases = Set<String>()
     @State private var isImportingPhoto = false
@@ -52,6 +53,11 @@ struct MyWordsView: View {
         }
         .task(id: capturedPhotoData) {
             await loadCapturedPhotoForRuleEntry()
+        }
+        .onAppear {
+            if photoRecognitionRule.isEmpty {
+                photoRecognitionRule = savedPhotoRecognitionRule
+            }
         }
         .sheet(isPresented: $showCamera) {
             CameraCaptureView(imageData: $capturedPhotoData)
@@ -247,11 +253,17 @@ struct MyWordsView: View {
             .filter { !$0.isEmpty }
 
         var importedCount = 0
+        var newPhrases: [String] = []
         for line in lines {
-            if !containsPhrase(line) {
-                savedPhrases.append(line)
+            let normalizedPhrase = normalizedImportedPhrase(line)
+            if !containsPhrase(normalizedPhrase) {
+                newPhrases.append(normalizedPhrase)
                 importedCount += 1
             }
+        }
+
+        if !newPhrases.isEmpty {
+            savedPhrases.insert(contentsOf: newPhrases.reversed(), at: 0)
         }
 
         importMessage = importedCount == 0
@@ -284,7 +296,7 @@ struct MyWordsView: View {
                 return
             }
             pendingPhotoData = data
-            photoRecognitionRule = "Phrases are on the left side and shown one per line."
+            photoRecognitionRule = savedPhotoRecognitionRule
             showPhotoImportRules = true
         } catch {
             importMessage = "Could not load the selected image."
@@ -294,7 +306,7 @@ struct MyWordsView: View {
     func loadCapturedPhotoForRuleEntry() async {
         guard let capturedPhotoData else { return }
         pendingPhotoData = capturedPhotoData
-        photoRecognitionRule = "Phrases are on the left side and shown one per line."
+        photoRecognitionRule = savedPhotoRecognitionRule
         self.capturedPhotoData = nil
         showPhotoImportRules = true
     }
@@ -304,6 +316,7 @@ struct MyWordsView: View {
 
         isImportingPhoto = true
         defer { isImportingPhoto = false }
+        savedPhotoRecognitionRule = photoRecognitionRule.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
             let extracted = try await extractPhrasesForPhotoImport(from: pendingPhotoData)
@@ -353,9 +366,16 @@ struct MyWordsView: View {
 
     func mergeImportedPhrases(_ phrases: [String]) -> Int {
         var importedCount = 0
-        for phrase in phrases where !containsPhrase(phrase) {
-            savedPhrases.append(phrase)
+        var newPhrases: [String] = []
+        for phrase in phrases {
+            let normalizedPhrase = normalizedImportedPhrase(phrase)
+            guard !containsPhrase(normalizedPhrase) else { continue }
+            newPhrases.append(normalizedPhrase)
             importedCount += 1
+        }
+
+        if !newPhrases.isEmpty {
+            savedPhrases.insert(contentsOf: newPhrases.reversed(), at: 0)
         }
         return importedCount
     }
@@ -371,6 +391,18 @@ struct MyWordsView: View {
     func containsPhrase(_ phrase: String) -> Bool {
         let normalizedPhrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines).normalizedProgressKey
         return savedPhrases.contains { $0.normalizedProgressKey == normalizedPhrase }
+    }
+
+    func normalizedImportedPhrase(_ phrase: String) -> String {
+        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let firstLetterRange = trimmed.rangeOfCharacter(from: .letters) else {
+            return trimmed
+        }
+
+        var result = trimmed
+        let lowercased = String(result[firstLetterRange]).lowercased()
+        result.replaceSubrange(firstLetterRange, with: lowercased)
+        return result
     }
 
     func compactMasteryProgressValue(for progress: PhraseProgress) -> Double {
