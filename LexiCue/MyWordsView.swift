@@ -16,6 +16,7 @@ struct MyWordsView: View {
     @Binding var practiceHistory: [String: [PracticeLogEntry]]
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
     @AppStorage("photoRecognitionRule") private var savedPhotoRecognitionRule = "Phrases are on the left side and shown one per line."
+    @AppStorage("playerXP") private var playerXP = 0
 
     @State private var pastedPhrases = ""
     @State private var importMessage = ""
@@ -264,6 +265,16 @@ struct MyWordsView: View {
 
         if !newPhrases.isEmpty {
             savedPhrases.insert(contentsOf: newPhrases.reversed(), at: 0)
+            let gainedXP = newPhrases.reduce(0) { $0 + PlayerXPManager.applyPhraseAdditionXP(for: $1) }
+            playerXP = PlayerXPManager.currentXP()
+            if gainedXP > 0 {
+                importMessage = importedCount == 0
+                    ? "No new phrases were imported."
+                    : "Imported \(importedCount) phrase\(importedCount == 1 ? "" : "s") and gained \(gainedXP) XP."
+                pastedPhrases = ""
+                focusedField = nil
+                return
+            }
         }
 
         importMessage = importedCount == 0
@@ -376,16 +387,20 @@ struct MyWordsView: View {
 
         if !newPhrases.isEmpty {
             savedPhrases.insert(contentsOf: newPhrases.reversed(), at: 0)
+            _ = newPhrases.reduce(0) { $0 + PlayerXPManager.applyPhraseAdditionXP(for: $1) }
+            playerXP = PlayerXPManager.currentXP()
         }
         return importedCount
     }
 
     func deleteAllPhrases() {
+        let totalRemovedXP = savedPhrases.reduce(0) { $0 + PlayerXPManager.applyPhraseDeletionXPRemoval(for: $1) }
         savedPhrases = []
         phraseProgress = [:]
         phraseMeanings = [:]
         practiceHistory = [:]
-        importMessage = "All phrases deleted."
+        playerXP = PlayerXPManager.currentXP()
+        importMessage = totalRemovedXP > 0 ? "All phrases deleted. \(totalRemovedXP) XP removed." : "All phrases deleted."
     }
 
     func containsPhrase(_ phrase: String) -> Bool {
@@ -452,6 +467,7 @@ struct PhraseEncyclopediaView: View {
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
+    @AppStorage("playerXP") private var playerXP = 0
     @State private var isLoadingMeaning = false
     private let appFont = Font.custom("Helvetica Neue", size: 17)
 
@@ -684,6 +700,8 @@ struct PhraseEncyclopediaView: View {
 
     func deletePhrase() {
         let key = phrase.normalizedProgressKey
+        _ = PlayerXPManager.applyPhraseDeletionXPRemoval(for: phrase)
+        playerXP = PlayerXPManager.currentXP()
         savedPhrases.removeAll { $0.normalizedProgressKey == key }
         phraseProgress.removeValue(forKey: key)
         phraseMeanings.removeValue(forKey: key)

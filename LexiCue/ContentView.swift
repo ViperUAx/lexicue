@@ -8,7 +8,10 @@ struct ContentView: View {
     @State private var showAISettings = false
     @State private var isBootstrapping = true
     @State private var bootstrapStatus = "Loading saved phrases."
+    @State private var xpGainToasts: [XPGainToast] = []
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
+    @AppStorage("playerXP") private var playerXP = 0
+    @AppStorage("highestPlayerLevelRaw") private var highestPlayerLevelRaw = PlayerLevel.one.rawValue
     private let appFont = Font.custom("Helvetica Neue", size: 17)
 
     let defaultPhrases = [
@@ -19,49 +22,58 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            mainContentView
-            .environment(\.font, appFont)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    aiToolbarButton
-                }
-            }
-            .sheet(isPresented: $showAISettings) {
-                AISettingsView(endpointURL: $backendBaseURL)
-            }
-            .task {
-                await bootstrapIfNeeded()
-            }
-            .onChange(of: savedPhrases) { _, newValue in
-                let deduplicated = deduplicatedPhrases(newValue)
-                if deduplicated != newValue {
-                    savedPhrases = deduplicated
-                    return
-                }
-
-                savePhrases(deduplicated)
-                removeProgressForDeletedPhrases(using: deduplicated)
-                removeMeaningForDeletedPhrases(using: deduplicated)
-                removePracticeHistoryForDeletedPhrases(using: deduplicated)
-            }
-            .onChange(of: phraseProgress) { _, newValue in
-                savePhraseProgress(newValue)
-            }
-            .onChange(of: phraseMeanings) { _, newValue in
-                savePhraseMeanings(newValue)
-            }
-            .onChange(of: practiceHistory) { _, newValue in
-                savePracticeHistory(newValue)
-            }
+            rootNavigationContent
         }
     }
 
-    @ViewBuilder
-    var mainContentView: some View {
+    var rootNavigationContent: some View {
+        RootContentContainer(
+            mainContent: mainContentView,
+            overlayContent: AnyView(xpGainOverlay)
+        )
+        .environment(\.font, appFont)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                aiToolbarButton
+            }
+        }
+        .sheet(isPresented: $showAISettings) {
+            AISettingsView(endpointURL: $backendBaseURL)
+        }
+        .task {
+            await bootstrapIfNeeded()
+        }
+        .task {
+            await listenForXPGains()
+        }
+        .onChange(of: savedPhrases) { _, newValue in
+            let deduplicated = deduplicatedPhrases(newValue)
+            if deduplicated != newValue {
+                savedPhrases = deduplicated
+                return
+            }
+
+            savePhrases(deduplicated)
+            removeProgressForDeletedPhrases(using: deduplicated)
+            removeMeaningForDeletedPhrases(using: deduplicated)
+            removePracticeHistoryForDeletedPhrases(using: deduplicated)
+        }
+        .onChange(of: phraseProgress) { _, newValue in
+            savePhraseProgress(newValue)
+        }
+        .onChange(of: phraseMeanings) { _, newValue in
+            savePhraseMeanings(newValue)
+        }
+        .onChange(of: practiceHistory) { _, newValue in
+            savePracticeHistory(newValue)
+        }
+    }
+
+    var mainContentView: AnyView {
         if isBootstrapping {
-            startupLoadingView
+            return AnyView(startupLoadingView)
         } else {
-            dashboardView
+            return AnyView(dashboardView)
         }
     }
 
@@ -72,6 +84,17 @@ struct ContentView: View {
                 showAISettings = true
             }
         }
+    }
+
+    var xpGainOverlay: some View {
+        ZStack {
+            ForEach(xpGainToasts.indices, id: \.self) { index in
+                XPGainToastView(toast: xpGainToasts[index], stackIndex: index)
+            }
+        }
+        .padding(.top, 12)
+        .animation(.easeOut(duration: 2), value: xpGainToasts)
+        .allowsHitTesting(false)
     }
 
     var startupLoadingView: some View {
@@ -95,6 +118,7 @@ struct ContentView: View {
     var dashboardView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                playerLevelSection
                 heroSection
                 summaryCards
                 actionSection
@@ -114,6 +138,50 @@ struct ContentView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    var playerLevelSection: some View {
+        let level = PlayerLevel(xp: playerXP)
+        let range = level.range
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Level \(level.rawValue)")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text("\(playerXP) XP")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if let nextLevel = level.nextLevel {
+                    Text("\(max(0, nextLevel.range.lowerBound - playerXP)) XP to Level \(nextLevel.rawValue)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Max level reached")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ProgressView(value: playerLevelProgressValue)
+                .tint(.blue)
+
+            HStack {
+                Text("\(range.lowerBound) XP")
+                Spacer()
+                Text("\(range.upperBound) XP")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
     var summaryCards: some View {
@@ -178,27 +246,66 @@ struct ContentView: View {
         phraseProgress.values.reduce(0) { $0 + $1.correctCount + $1.wrongCount }
     }
 
+    var playerLevelProgressValue: Double {
+        let range = PlayerLevel(xp: playerXP).range
+        let covered = min(max(playerXP, range.lowerBound), range.upperBound) - range.lowerBound
+        let span = max(1, range.upperBound - range.lowerBound)
+        return Double(covered) / Double(span)
+    }
+
     @MainActor
     func bootstrapIfNeeded() async {
         guard isBootstrapping else { return }
 
-        bootstrapStatus = "Loading saved phrases."
+        await showBootstrapStep("Waking up your study space.")
         let phrases = await loadSavedPhrases()
 
-        bootstrapStatus = "Loading progress."
+        await showBootstrapStep("Bringing your phrase list into place.")
         let progress = await loadStoredPhraseProgress()
 
-        bootstrapStatus = "Loading meanings."
+        await showBootstrapStep("Restoring your mastery progress.")
         let meanings = await loadStoredPhraseMeanings()
 
-        bootstrapStatus = "Loading practice history."
+        await showBootstrapStep("Preparing meanings and notes.")
         let history = await loadStoredPracticeHistory()
+
+        await showBootstrapStep("Collecting your recent practice moments.")
+        await showBootstrapStep("Getting the first screen ready.")
 
         savedPhrases = phrases
         phraseProgress = progress
         phraseMeanings = meanings
         practiceHistory = history
+        highestPlayerLevelRaw = max(highestPlayerLevelRaw, PlayerLevel(xp: playerXP).rawValue)
         isBootstrapping = false
+    }
+
+    @MainActor
+    func showBootstrapStep(_ message: String) async {
+        bootstrapStatus = message
+        try? await Task.sleep(for: .milliseconds(220))
+    }
+
+    @MainActor
+    func listenForXPGains() async {
+        for await notification in NotificationCenter.default.notifications(named: .didGainXP) {
+            guard let amount = notification.object as? Int, amount > 0 else { continue }
+            showXPGainToast(amount: amount)
+        }
+    }
+
+    @MainActor
+    func showXPGainToast(amount: Int) {
+        let toast = XPGainToast(amount: amount)
+        xpGainToasts.append(toast)
+
+        Task { @MainActor in
+            guard let index = xpGainToasts.firstIndex(where: { $0.id == toast.id }) else { return }
+            xpGainToasts[index].isAnimating = true
+
+            try? await Task.sleep(for: .seconds(2))
+            xpGainToasts.removeAll { $0.id == toast.id }
+        }
     }
 
     func savePhrases(_ phrases: [String]) {
@@ -532,6 +639,243 @@ struct PracticeLogEntry: Codable, Hashable, Identifiable {
         self.wasCorrect = wasCorrect
         self.createdAt = createdAt
     }
+}
+
+struct XPGainToast: Identifiable, Equatable {
+    let id = UUID()
+    let amount: Int
+    var isAnimating = false
+}
+
+struct XPGainToastView: View {
+    let toast: XPGainToast
+    let stackIndex: Int
+
+    var body: some View {
+        Text("+\(toast.amount) XP")
+            .font(.headline)
+            .fontWeight(.bold)
+            .foregroundStyle(.blue)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+            .offset(y: toast.isAnimating ? animatedOffset : initialOffset)
+            .opacity(toast.isAnimating ? 0 : 1)
+    }
+
+    private var initialOffset: CGFloat {
+        CGFloat(-10 - (stackIndex * 12))
+    }
+
+    private var animatedOffset: CGFloat {
+        CGFloat(-60 - (stackIndex * 12))
+    }
+}
+
+struct RootContentContainer: View {
+    let mainContent: AnyView
+    let overlayContent: AnyView
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            mainContent
+            overlayContent
+        }
+    }
+}
+
+enum PlayerLevel: Int, CaseIterable {
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+    case five = 5
+    case six = 6
+    case seven = 7
+    case eight = 8
+    case nine = 9
+    case ten = 10
+    case eleven = 11
+    case twelve = 12
+    case thirteen = 13
+    case fourteen = 14
+    case fifteen = 15
+    case sixteen = 16
+    case seventeen = 17
+    case eighteen = 18
+    case nineteen = 19
+    case twenty = 20
+    case twentyOne = 21
+    case twentyTwo = 22
+    case twentyThree = 23
+    case twentyFour = 24
+    case twentyFive = 25
+    case twentySix = 26
+    case twentySeven = 27
+    case twentyEight = 28
+    case twentyNine = 29
+    case thirty = 30
+    case thirtyOne = 31
+    case thirtyTwo = 32
+    case thirtyThree = 33
+    case thirtyFour = 34
+    case thirtyFive = 35
+    case thirtySix = 36
+    case thirtySeven = 37
+    case thirtyEight = 38
+    case thirtyNine = 39
+    case forty = 40
+
+    init(xp: Int) {
+        self = Self.allCases.first(where: { xp <= $0.range.upperBound }) ?? .forty
+    }
+
+    var range: ClosedRange<Int> {
+        switch self {
+        case .one: return 0...100
+        case .two: return 101...235
+        case .three: return 236...436
+        case .four: return 437...704
+        case .five: return 705...1039
+        case .six: return 1040...1440
+        case .seven: return 1441...1908
+        case .eight: return 1909...2443
+        case .nine: return 2444...3044
+        case .ten: return 3045...3712
+        case .eleven: return 3713...4447
+        case .twelve: return 4448...5248
+        case .thirteen: return 5249...6116
+        case .fourteen: return 6117...7051
+        case .fifteen: return 7052...8052
+        case .sixteen: return 8053...9120
+        case .seventeen: return 9121...10255
+        case .eighteen: return 10256...11456
+        case .nineteen: return 11457...12724
+        case .twenty: return 12725...14059
+        case .twentyOne: return 14060...15460
+        case .twentyTwo: return 15461...16928
+        case .twentyThree: return 16929...18463
+        case .twentyFour: return 18464...20064
+        case .twentyFive: return 20065...21732
+        case .twentySix: return 21733...23467
+        case .twentySeven: return 23468...25268
+        case .twentyEight: return 25269...27136
+        case .twentyNine: return 27137...29071
+        case .thirty: return 29072...31072
+        case .thirtyOne: return 31073...33140
+        case .thirtyTwo: return 33141...35275
+        case .thirtyThree: return 35276...37476
+        case .thirtyFour: return 37477...39744
+        case .thirtyFive: return 39745...42079
+        case .thirtySix: return 42080...44480
+        case .thirtySeven: return 44481...46948
+        case .thirtyEight: return 46949...49483
+        case .thirtyNine: return 49484...52084
+        case .forty: return 52085...54752
+        }
+    }
+
+    var nextLevel: PlayerLevel? {
+        PlayerLevel(rawValue: rawValue + 1)
+    }
+}
+
+enum PlayerXPManager {
+    static let xpKey = "playerXP"
+    static let highestLevelKey = "highestPlayerLevelRaw"
+    static let additionGainDateKey = "dailyAdditionXPDate"
+    static let additionGainAmountKey = "dailyAdditionXPGained"
+
+    static func currentXP() -> Int {
+        UserDefaults.standard.integer(forKey: xpKey)
+    }
+
+    static func currentLevel() -> PlayerLevel {
+        PlayerLevel(xp: currentXP())
+    }
+
+    static func highestReachedLevelRaw() -> Int {
+        max(
+            UserDefaults.standard.integer(forKey: highestLevelKey),
+            PlayerLevel(xp: currentXP()).rawValue
+        )
+    }
+
+    static func applySessionXPReward(masteryPoints: Int, successRate: Double) -> Int {
+        let effectiveMasteryPoints = max(0, masteryPoints)
+        guard effectiveMasteryPoints > 0, successRate > 0 else { return 0 }
+
+        let reward = Int(ceil((Double(effectiveMasteryPoints) * (successRate * 100)) / 200))
+        guard reward > 0 else { return 0 }
+        applyXPGain(reward)
+        return reward
+    }
+
+    static func applyPhraseAdditionXP(for phrase: String) -> Int {
+        resetDailyAdditionIfNeeded()
+
+        let level = currentLevel()
+        let dailyLimit = 50 + (level.rawValue * 10)
+        let gainedToday = UserDefaults.standard.integer(forKey: additionGainAmountKey)
+        let remaining = max(0, dailyLimit - gainedToday)
+        guard remaining > 0 else { return 0 }
+
+        let reward = min(remaining, phraseXPValue(for: phrase))
+        guard reward > 0 else { return 0 }
+
+        applyXPGain(reward)
+        UserDefaults.standard.set(gainedToday + reward, forKey: additionGainAmountKey)
+        UserDefaults.standard.set(currentDayStamp(), forKey: additionGainDateKey)
+        return reward
+    }
+
+    static func applyPhraseDeletionXPRemoval(for phrase: String) -> Int {
+        let removal = phraseXPValue(for: phrase)
+        guard removal > 0 else { return 0 }
+
+        let currentXP = currentXP()
+        let highestLevel = PlayerLevel(rawValue: highestReachedLevelRaw()) ?? .one
+        let floorXP = highestLevel.range.lowerBound
+        let updatedXP = max(floorXP, currentXP - removal)
+        UserDefaults.standard.set(updatedXP, forKey: xpKey)
+        UserDefaults.standard.set(highestReachedLevelRaw(), forKey: highestLevelKey)
+        return currentXP - updatedXP
+    }
+
+    static func phraseXPValue(for phrase: String) -> Int {
+        let wordCount = phrase.split(whereSeparator: \.isWhitespace).count
+        return max(0, wordCount * 2)
+    }
+
+    private static func applyXPGain(_ gain: Int) {
+        let currentXP = currentXP()
+        let updatedXP = currentXP + gain
+        UserDefaults.standard.set(updatedXP, forKey: xpKey)
+        let highestRaw = max(highestReachedLevelRaw(), PlayerLevel(xp: updatedXP).rawValue)
+        UserDefaults.standard.set(highestRaw, forKey: highestLevelKey)
+        NotificationCenter.default.post(name: .didGainXP, object: gain)
+    }
+
+    private static func resetDailyAdditionIfNeeded() {
+        let today = currentDayStamp()
+        let storedDay = UserDefaults.standard.string(forKey: additionGainDateKey)
+        if storedDay != today {
+            UserDefaults.standard.set(today, forKey: additionGainDateKey)
+            UserDefaults.standard.set(0, forKey: additionGainAmountKey)
+        }
+    }
+
+    private static func currentDayStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+}
+
+extension Notification.Name {
+    static let didGainXP = Notification.Name("didGainXP")
 }
 
 struct AISettingsView: View {
@@ -892,15 +1236,14 @@ extension String {
 }
 
 nonisolated func weakestPhraseCandidates(from phrases: [String], phraseProgress: [String: PhraseProgress]) -> [String] {
-    phrases.sorted { lhs, rhs in
+    phrases
+        .filter {
+            let progress = phraseProgress[$0.normalizedProgressKey] ?? PhraseProgress()
+            return progress.totalAttempts > 2
+        }
+        .sorted { lhs, rhs in
         let left = phraseProgress[lhs.normalizedProgressKey] ?? PhraseProgress()
         let right = phraseProgress[rhs.normalizedProgressKey] ?? PhraseProgress()
-
-        let leftNeverPlayed = left.totalAttempts == 0
-        let rightNeverPlayed = right.totalAttempts == 0
-        if leftNeverPlayed != rightNeverPlayed {
-            return leftNeverPlayed
-        }
 
         if left.successRate != right.successRate {
             return left.successRate < right.successRate

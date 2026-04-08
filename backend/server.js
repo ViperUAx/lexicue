@@ -551,9 +551,10 @@ function buildSentenceSystemPrompt(mode) {
             "Do not include the original phrase in the sentence.",
             "Instead, include one natural synonym or near-synonymous wording that fits the sentence.",
             "The synonym must have the same grammatical role and structure as the original phrase.",
-            "The original phrase must be able to replace the synonym directly without changing any other words in the sentence.",
-            "Do not change tense, aspect, modality, person, number, or clause structure when choosing the synonym.",
+            "The original phrase must be able to replace the synonym directly, unchanged, without changing any other words in the sentence.",
+            "Do not change tense, aspect, modality, person, number, articles, plurality, or clause structure when choosing the synonym.",
             "Avoid paraphrases that only match the meaning loosely but would make the original phrase sound unnatural or ungrammatical.",
+            "If the exact saved phrase would need any grammatical transformation after substitution, reject that sentence idea and write a different one.",
             "Return that synonym or substitute in highlightedText exactly as it appears in the sentence.",
             "The sentence must stay fully grammatical and natural."
         ].join(" ");
@@ -587,7 +588,8 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
         return [
             `Generate two search-mode cards for this saved phrase: ${phrase}.`,
             "The learner should infer the original saved phrase from a synonym or near-synonymous wording used in the sentence.",
-            "The original phrase must be able to replace the highlighted wording directly and still sound grammatical and natural.",
+            "The original phrase must be able to replace the highlighted wording directly, unchanged, and still sound grammatical and natural.",
+            "Do not write any sentence where the exact saved phrase would need conjugation or another grammatical change after substitution.",
             "Make both cards clearly different in setting, logic, and sentence structure.",
             "Return each card as { sentence, highlightedText }.",
             "highlightedText must be the exact synonym substring present in sentence.",
@@ -600,6 +602,7 @@ function buildSentenceUserPrompt(phrase, mode, previousSentences) {
         "Make both cards clearly different in setting, logic, and sentence structure.",
         "Use sentence frames where the exact saved phrase fits without any grammatical changes.",
         "Do not write a sentence that would really need a different inflected form of the phrase.",
+        "If the phrase is a verb or verb phrase, avoid past-time or third-person contexts unless the exact saved phrase still fits unchanged.",
         "Return each card as { sentence, highlightedText }.",
         "highlightedText must be an empty string for every card.",
         previousBlock

@@ -25,6 +25,9 @@ struct QuizView: View {
     @State private var revealedCorrectAnswer = false
     @State private var sessionCorrectCount = 0
     @State private var sessionWrongCount = 0
+    @State private var sessionMasteryPointsEarned = 0
+    @State private var sessionXPGained = 0
+    @State private var awardedSessionXP = false
     @State private var showSessionSummary = false
     @State private var generationSource: PracticeGenerationSource = .ai
     @State private var isRefreshingCurrentCard = false
@@ -32,6 +35,7 @@ struct QuizView: View {
     @State private var promptRevealTask: Task<Void, Never>?
     @State private var autoAdvanceTask: Task<Void, Never>?
     @AppStorage("backendBaseURL") private var backendBaseURL = ""
+    @AppStorage("playerXP") private var playerXP = 0
     @FocusState private var answerFieldFocused: Bool
     private let appFont = Font.custom("Helvetica Neue", size: 17)
 
@@ -76,6 +80,9 @@ struct QuizView: View {
                             .keyboardType(.asciiCapable)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .onChange(of: userAnswer) { _, newValue in
+                                autocompleteLongPhraseIfNeeded(for: currentCard, typedValue: newValue)
+                            }
                             .onSubmit {
                                 checkAnswer(for: currentCard)
                             }
@@ -378,6 +385,7 @@ struct QuizView: View {
         }
 
         if currentIndex + 1 >= practiceCards.count {
+            awardSessionXPIfNeeded()
             showSessionSummary = true
             return
         }
@@ -394,6 +402,9 @@ struct QuizView: View {
         currentIndex = 0
         sessionCorrectCount = 0
         sessionWrongCount = 0
+        sessionMasteryPointsEarned = 0
+        sessionXPGained = 0
+        awardedSessionXP = false
         resetCardState()
         generationStatus = "Opening the AI session."
         await Task.yield()
@@ -468,6 +479,29 @@ struct QuizView: View {
 
     func isAnswerCorrect(for card: PracticeCard) -> Bool {
         normalized(userAnswer) == normalized(card.phrase)
+    }
+
+    func autocompleteLongPhraseIfNeeded(for card: PracticeCard, typedValue: String) {
+        let phraseWords = card.phrase
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+
+        guard phraseWords.count > 3 else { return }
+
+        let typedWords = typedValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+
+        guard typedWords.count >= 3 else { return }
+
+        let targetPrefix = Array(phraseWords.prefix(3)).map { normalized($0) }
+        let typedPrefix = Array(typedWords.prefix(3)).map { normalized($0) }
+
+        guard typedPrefix == targetPrefix else { return }
+        guard userAnswer != card.phrase else { return }
+
+        userAnswer = card.phrase
     }
 
     func resetCardState() {
@@ -646,6 +680,13 @@ struct QuizView: View {
                 Text("Correct \(sessionCorrectCount) • Missed \(sessionWrongCount)")
                     .font(.headline)
                     .foregroundStyle(.secondary)
+
+                if sessionXPGained > 0 {
+                    Text("+\(sessionXPGained) XP")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.blue)
+                }
             }
 
             Button("Next Session") {
@@ -692,8 +733,20 @@ struct QuizView: View {
     func applyMasteryPoints(for card: PracticeCard, wasCorrect: Bool) {
         let key = card.phrase.normalizedProgressKey
         var progress = phraseProgress[key] ?? PhraseProgress()
-        progress.applyMasteryDelta(masteryDelta(wasCorrect: wasCorrect))
+        let delta = masteryDelta(wasCorrect: wasCorrect)
+        progress.applyMasteryDelta(delta)
         phraseProgress[key] = progress
+        sessionMasteryPointsEarned += delta
+    }
+
+    func awardSessionXPIfNeeded() {
+        guard !awardedSessionXP else { return }
+        awardedSessionXP = true
+        sessionXPGained = PlayerXPManager.applySessionXPReward(
+            masteryPoints: sessionMasteryPointsEarned,
+            successRate: sessionSuccessRate
+        )
+        playerXP = PlayerXPManager.currentXP()
     }
 
     func masteryDelta(wasCorrect: Bool) -> Int {
@@ -1371,36 +1424,7 @@ enum PracticeCycleManager {
     ) -> [String] {
         let candidates = candidatePhrases(for: mode, phraseScope: phraseScope, phrases: phrases, phraseProgress: phraseProgress)
         guard !candidates.isEmpty else { return [] }
-
-        var state = loadState(
-            for: mode,
-            phraseScope: phraseScope,
-            candidates: candidates,
-            phraseProgress: phraseProgress
-        )
-        var selected: [String] = []
-        let targetCount = max(1, count)
-        var inspectedCount = 0
-
-        while selected.count < targetCount, inspectedCount < max(state.order.count * 2, 1) {
-            if state.order.isEmpty || state.nextIndex >= state.order.count {
-                state.order = orderedPool(for: phraseScope, pool: state.pool)
-                state.nextIndex = 0
-            }
-
-            let phrase = state.order[state.nextIndex]
-            state.nextIndex += 1
-            inspectedCount += 1
-
-            guard !excludedPhrases.contains(phrase), !selected.contains(phrase) else {
-                continue
-            }
-
-            selected.append(phrase)
-        }
-
-        saveState(state, for: mode, phraseScope: phraseScope)
-        return selected
+        return Array(candidates.filter { !excludedPhrases.contains($0) }.prefix(max(1, count)))
     }
 
     static func candidatePhrases(
@@ -1410,78 +1434,21 @@ enum PracticeCycleManager {
         phraseProgress: [String: PhraseProgress]
     ) -> [String] {
         switch phraseScope {
-        case .all, .selected, .lessPlayed:
+        case .all:
+            return phrases.shuffled()
+        case .selected:
             return phrases
+        case .lessPlayed:
+            return phrases.sorted { lhs, rhs in
+                let left = phraseProgress[lhs.normalizedProgressKey] ?? PhraseProgress()
+                let right = phraseProgress[rhs.normalizedProgressKey] ?? PhraseProgress()
+                if left.totalAttempts != right.totalAttempts {
+                    return left.totalAttempts < right.totalAttempts
+                }
+                return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
         case .weakest:
             return weakestPhraseCandidates(from: phrases, phraseProgress: phraseProgress)
-        }
-    }
-
-    private static func loadState(
-        for mode: PracticeMode,
-        phraseScope: PracticePhraseScope,
-        candidates: [String],
-        phraseProgress: [String: PhraseProgress]
-    ) -> PracticeCycleState {
-        let key = mode.cycleStorageKey(for: phraseScope)
-        guard
-            let data = UserDefaults.standard.data(forKey: key),
-            let state = try? JSONDecoder().decode(PracticeCycleState.self, from: data),
-            !state.pool.isEmpty,
-            Set(state.order) == Set(state.pool),
-            state.order.count == state.pool.count,
-            state.nextIndex >= 0,
-            state.nextIndex <= state.order.count
-        else {
-            let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
-            return PracticeCycleState(pool: newPool, order: orderedPool(for: phraseScope, pool: newPool), nextIndex: 0)
-        }
-
-        let candidateSet = Set(candidates)
-        let poolSet = Set(state.pool)
-
-        switch mode {
-        case .random, .search:
-            if poolSet == candidateSet, state.pool.count == candidates.count {
-                return state
-            }
-        case .weakest:
-            if !poolSet.subtracting(candidateSet).isEmpty {
-                let newPool = freezePool(for: mode, candidates: candidates, phraseProgress: phraseProgress, phraseScope: phraseScope)
-                return PracticeCycleState(pool: newPool, order: orderedPool(for: phraseScope, pool: newPool), nextIndex: 0)
-            }
-        }
-
-        return state
-    }
-
-    private static func saveState(_ state: PracticeCycleState, for mode: PracticeMode, phraseScope: PracticePhraseScope) {
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        UserDefaults.standard.set(data, forKey: mode.cycleStorageKey(for: phraseScope))
-    }
-
-    private static func freezePool(for mode: PracticeMode, candidates: [String], phraseProgress: [String: PhraseProgress] = [:], phraseScope: PracticePhraseScope = .all) -> [String] {
-        switch phraseScope {
-        case .lessPlayed:
-            return candidates.sorted { lhs, rhs in
-                let leftProgress = phraseProgress[lhs.normalizedProgressKey] ?? PhraseProgress()
-                let rightProgress = phraseProgress[rhs.normalizedProgressKey] ?? PhraseProgress()
-                if leftProgress.totalAttempts == rightProgress.totalAttempts {
-                    return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-                }
-                return leftProgress.totalAttempts < rightProgress.totalAttempts
-            }
-        case .all, .selected, .weakest:
-            return candidates
-        }
-    }
-
-    private static func orderedPool(for phraseScope: PracticePhraseScope, pool: [String]) -> [String] {
-        switch phraseScope {
-        case .all, .selected:
-            return pool.shuffled()
-        case .lessPlayed, .weakest:
-            return pool
         }
     }
 }
